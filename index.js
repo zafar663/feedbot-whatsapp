@@ -13,13 +13,13 @@ const sessions = new Map();
 
 function getSession(from) {
   if (!sessions.has(from)) {
-    sessions.set(from, { state: "MAIN", data: {}, lastReport: null });
+    sessions.set(from, { state: "MAIN", data: {} });
   }
   return sessions.get(from);
 }
 
 function resetSession(from) {
-  sessions.set(from, { state: "MAIN", data: {}, lastReport: null });
+  sessions.set(from, { state: "MAIN", data: {} });
 }
 
 function firstDigit(text) {
@@ -28,38 +28,29 @@ function firstDigit(text) {
 }
 
 /* =========================
-   FLEXIBLE FORMULA READER
-   (accepts ANY format)
+   FLEXIBLE FORMULA INTAKE
 ========================= */
 function parsePastedFormula(text) {
   if (!text) return [];
 
   let clean = text
-    .replace(/o\./gi, "0.")   // fix o.122 typo
+    .replace(/o\./gi, "0.")
     .replace(/\r/g, "\n");
 
-  const chunks = clean
-    .split(/[,;\n]+/)
-    .map(c => c.trim())
-    .filter(Boolean);
-
+  const chunks = clean.split(/[,;\n]+/).map(c => c.trim()).filter(Boolean);
   const items = [];
 
   for (const chunk of chunks) {
-    const numbers = chunk.match(/-?\d+(\.\d+)?/g);
-    if (!numbers) continue;
+    const nums = chunk.match(/-?\d+(\.\d+)?/g);
+    if (!nums) continue;
 
-    const inclusion = Number(numbers[numbers.length - 1]);
+    const inclusion = Number(nums[nums.length - 1]);
     if (!Number.isFinite(inclusion)) continue;
 
-    const idx = chunk.lastIndexOf(numbers[numbers.length - 1]);
+    const idx = chunk.lastIndexOf(nums[nums.length - 1]);
     let name = chunk.substring(0, idx).trim();
 
-    name = name
-      .replace(/[%:]+$/g, "")
-      .replace(/\s+/g, " ")
-      .trim();
-
+    name = name.replace(/[%:]+$/g, "").replace(/\s+/g, " ").trim();
     if (!name) name = "Custom ingredient";
 
     items.push({ name, inclusion });
@@ -71,34 +62,20 @@ function parsePastedFormula(text) {
 /* =========================
    SIMPLE ANALYSIS (MVP)
 ========================= */
-function analyzeFormula({ species, phase, feedForm, items }) {
+function analyzeFormula(ctx, items) {
   const total = items.reduce((s, i) => s + i.inclusion, 0);
-
-  const lower = items.map(i => i.name.toLowerCase());
-  const hasSalt = lower.some(n => n.includes("salt") || n.includes("nacl"));
-  const hasPremix = lower.some(n => n.includes("premix"));
-  const hasLime = lower.some(n => n.includes("lime") || n.includes("caco3"));
-
-  const flags = [];
-  if (total < 95 || total > 105) flags.push(`Total inclusion ≈ ${total.toFixed(2)}%`);
-  if (!hasPremix) flags.push("Premix not detected");
-  if (!hasSalt) flags.push("Salt not detected");
-  if (species === "Layer" && !hasLime) flags.push("No limestone/Ca source detected");
-
-  const list = items.slice(0, 15)
-    .map(i => `- ${i.name}: ${i.inclusion}%`)
-    .join("\n");
 
   return (
     `✅ Formula captured successfully\n\n` +
-    `Species: ${species}\n` +
-    `Phase: ${phase}\n` +
-    `Feed form: ${feedForm}\n` +
-    `Ingredients detected: ${items.length}\n` +
-    `Total: ${total.toFixed(2)}%\n\n` +
-    `Ingredients:\n${list}\n\n` +
-    (flags.length ? `⚠️ Flags:\n- ${flags.join("\n- ")}` : `✅ No major formulation flags detected`) +
-    `\n\nIngredient names accepted as entered.\nType MENU to start again.`
+    `Animal: Poultry\n` +
+    `Type: ${ctx.poultryType}\n` +
+    `Genetic line: ${ctx.geneticLine}\n` +
+    `Stage: ${ctx.stage}\n` +
+    `Feed form: ${ctx.feedForm}\n` +
+    `Ingredients: ${items.length}\n` +
+    `Total inclusion: ${total.toFixed(2)}%\n\n` +
+    `Ingredient names accepted as entered.\n\n` +
+    `Type MENU to start again.`
   );
 }
 
@@ -117,7 +94,7 @@ How can we help you today?
 5) Nutrition Partner Program`;
 
 app.get("/", (req, res) => {
-  res.send("NutriPilot AI router – FULL flexible intake ✅");
+  res.send("NutriPilot AI – Poultry flow locked ✅");
 });
 
 /* =========================
@@ -139,62 +116,90 @@ app.post("/whatsapp", (req, res) => {
     return res.type("text/xml").send(twiml.toString());
   }
 
-  /* MAIN MENU */
+  /* MAIN */
   if (session.state === "MAIN") {
     if (choice === "1") {
-      session.state = "SPECIES";
-      twiml.message("Select species:\n1) Broiler\n2) Layer");
+      session.state = "ANIMAL";
+      twiml.message("Select animal category:\n1) Poultry\n2) Swine\n3) Dairy Cattle\n4) Beef Cattle\n5) Small Ruminants\n6) Equine");
     } else {
       twiml.message(MAIN_MENU);
     }
     return res.type("text/xml").send(twiml.toString());
   }
 
-  /* SPECIES */
-  if (session.state === "SPECIES") {
-    session.data.species = choice === "2" ? "Layer" : "Broiler";
-    session.state = "PHASE";
-    twiml.message("Enter phase (Starter / Grower / Finisher / Peak):");
+  /* ANIMAL */
+  if (session.state === "ANIMAL") {
+    if (choice === "1") {
+      session.state = "POULTRY_TYPE";
+      twiml.message("Select poultry type:\n1) Broiler\n2) Layer\n3) Breeder (Parent Stock)");
+    } else {
+      twiml.message("Only Poultry implemented in MVP.\nType MENU.");
+    }
     return res.type("text/xml").send(twiml.toString());
   }
 
-  /* PHASE */
-  if (session.state === "PHASE") {
-    session.data.phase = body;
+  /* POULTRY TYPE */
+  if (session.state === "POULTRY_TYPE") {
+    session.data.poultryType =
+      choice === "1" ? "Broiler" :
+      choice === "2" ? "Layer" : "Breeder";
+
+    session.state = "GENETIC";
+    twiml.message(
+      "Select genetic line:\n" +
+      "1) Ross\n2) Cobb\n3) Hubbard\n4) Arbor Acres\n5) Hy-Line\n6) Lohmann\n7) Other"
+    );
+    return res.type("text/xml").send(twiml.toString());
+  }
+
+  /* GENETIC */
+  if (session.state === "GENETIC") {
+    const map = {
+      "1": "Ross", "2": "Cobb", "3": "Hubbard", "4": "Arbor Acres",
+      "5": "Hy-Line", "6": "Lohmann", "7": "Other"
+    };
+    session.data.geneticLine = map[choice] || "Other";
+    session.state = "STAGE";
+
+    if (session.data.poultryType === "Broiler") {
+      twiml.message("Select broiler stage:\n1) Starter\n2) Grower\n3) Finisher\n4) Withdrawal");
+    } else if (session.data.poultryType === "Layer") {
+      twiml.message("Select layer stage:\n1) Chick\n2) Grower\n3) Pre-lay\n4) Peak lay\n5) Post-peak");
+    } else {
+      twiml.message("Select breeder stage:\n1) Rearing\n2) Pre-breeder\n3) Production");
+    }
+    return res.type("text/xml").send(twiml.toString());
+  }
+
+  /* STAGE */
+  if (session.state === "STAGE") {
+    const broiler = ["Starter","Grower","Finisher","Withdrawal"];
+    const layer = ["Chick","Grower","Pre-lay","Peak lay","Post-peak"];
+    const breeder = ["Rearing","Pre-breeder","Production"];
+
+    session.data.stage =
+      session.data.poultryType === "Broiler" ? broiler[choice-1] :
+      session.data.poultryType === "Layer" ? layer[choice-1] :
+      breeder[choice-1];
+
     session.state = "FORM";
-    twiml.message("Feed form? (Mash / Pellet):");
+    twiml.message("Feed form:\n1) Mash\n2) Pellet\n3) Crumble");
     return res.type("text/xml").send(twiml.toString());
   }
 
-  /* FEED FORM */
+  /* FORM */
   if (session.state === "FORM") {
-    session.data.feedForm = body;
+    session.data.feedForm = choice === "1" ? "Mash" : choice === "2" ? "Pellet" : "Crumble";
     session.state = "PASTE";
-    twiml.message("Paste your full formula now (any format, very flexible):");
+    twiml.message("Paste your full formula now (any format accepted):");
     return res.type("text/xml").send(twiml.toString());
   }
 
-  /* FORMULA PASTE */
+  /* FORMULA */
   if (session.state === "PASTE") {
     const items = parsePastedFormula(body);
-
-    if (items.length < 2) {
-      twiml.message(
-        "I couldn’t extract enough ingredients.\n\n" +
-        "Please paste the full formula again (any format is fine)."
-      );
-      return res.type("text/xml").send(twiml.toString());
-    }
-
-    const report = analyzeFormula({
-      species: session.data.species,
-      phase: session.data.phase,
-      feedForm: session.data.feedForm,
-      items
-    });
-
-    session.lastReport = report;
-    session.state = "MAIN";
+    const report = analyzeFormula(session.data, items);
+    resetSession(from);
     twiml.message(report);
     return res.type("text/xml").send(twiml.toString());
   }
@@ -203,8 +208,6 @@ app.post("/whatsapp", (req, res) => {
   res.type("text/xml").send(twiml.toString());
 });
 
-/* =========================
-   SERVER
-========================= */
+/* ========================= */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("NutriPilot AI running"));
