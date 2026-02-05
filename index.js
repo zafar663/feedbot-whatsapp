@@ -5,11 +5,12 @@ const twilio = require("twilio");
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 
+// Versioned health check so you know which code is live
 app.get("/", (req, res) => {
-  res.status(200).send("NutriPilot AI is running ✅");
+  res.status(200).send("NutriPilot AI router v2 ✅");
 });
 
-/** In-memory session state (simple + works for MVP) */
+/** In-memory session state */
 const sessions = new Map(); // key = WhatsApp number, value = { state: "MAIN" | "CORE1" | ... }
 
 function getState(from) {
@@ -64,9 +65,14 @@ const CORE4_MENU =
 const CORE5_MENU =
   `Nutrition Partner Program\n\n` +
   `1) What you get (scope)\n` +
-  `2) Pricing / contracts (later)\n` +
-  `3) Start onboarding (later)\n\n` +
+  `2) Onboarding steps (next)\n\n` +
   `Type BACK / MENU.`;
+
+/** Helper: robustly extract first menu number from any message */
+function firstDigitChoice(text) {
+  const m = (text || "").trim().match(/^([1-9])/); // first character is a digit 1-9
+  return m ? m[1] : null;
+}
 
 app.post("/whatsapp", (req, res) => {
   const from = req.body.From || "unknown";
@@ -76,12 +82,13 @@ app.post("/whatsapp", (req, res) => {
   const twiml = new twilio.twiml.MessagingResponse();
 
   // Global commands
-  if (msg === "menu" || msg === "start" || msg === "hi" || msg === "hello" || msg === "") {
+  if (msg === "" || msg === "hi" || msg === "hello" || msg === "start" || msg === "menu") {
     reset(from);
     twiml.message(MAIN_MENU);
     res.type("text/xml");
     return res.send(twiml.toString());
   }
+
   if (msg === "back") {
     reset(from);
     twiml.message(MAIN_MENU);
@@ -90,22 +97,23 @@ app.post("/whatsapp", (req, res) => {
   }
 
   const state = getState(from);
+  const choice = firstDigitChoice(raw); // <- IMPORTANT: parse first digit reliably
 
   // MAIN selection
   if (state === "MAIN") {
-    if (msg === "1") {
+    if (choice === "1") {
       setState(from, "CORE1");
       twiml.message(CORE1_MENU);
-    } else if (msg === "2") {
+    } else if (choice === "2") {
       setState(from, "CORE2");
       twiml.message(CORE2_MENU);
-    } else if (msg === "3") {
+    } else if (choice === "3") {
       setState(from, "CORE3");
       twiml.message(CORE3_MENU);
-    } else if (msg === "4") {
+    } else if (choice === "4") {
       setState(from, "CORE4");
       twiml.message(CORE4_MENU);
-    } else if (msg === "5") {
+    } else if (choice === "5") {
       setState(from, "CORE5");
       twiml.message(CORE5_MENU);
     } else {
@@ -116,15 +124,14 @@ app.post("/whatsapp", (req, res) => {
     return res.send(twiml.toString());
   }
 
-  // Core submenus (MVP: just acknowledge + show submenu again)
+  // Core submenus (MVP: show submenu again, start only CORE1 option 1)
   if (state === "CORE1") {
-    if (msg === "1") {
+    if (choice === "1") {
       twiml.message(
         `✅ Starting: Build a new formula (MVP)\n\n` +
           `Next we’ll ask species + phase + available ingredients.\n\n` +
           `Type BACK / MENU anytime.`
       );
-      // Next step we’ll add the actual intake questions
     } else {
       twiml.message(CORE1_MENU);
     }
