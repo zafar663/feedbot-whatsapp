@@ -3,50 +3,147 @@ const express = require("express");
 const twilio = require("twilio");
 
 const app = express();
-
-// Twilio sends WhatsApp data as form-urlencoded
 app.use(express.urlencoded({ extended: false }));
 
-// Health check (Render / browser)
 app.get("/", (req, res) => {
   res.status(200).send("NutriPilot AI is running ✅");
 });
 
-// WhatsApp webhook
-app.post("/whatsapp", (req, res) => {
-  const incomingMsg = (req.body.Body || "").trim().toLowerCase();
+/** In-memory session state (simple + works for MVP) */
+const sessions = new Map(); // key = WhatsApp number, value = { state: "MAIN" | "CORE1" | ... }
 
-  const menu =
-    `NutriPilot AI\n\n` +
-    `How can we help you today?\n\n` +
-    `1) Formulation & Diet Control\n` +
-    `2) Performance & Production Intelligence\n` +
-    `3) Raw Materials, Feed Mill & Quality\n` +
-    `4) Expert Review\n` +
-    `5) Nutrition Partner Program`;
+function getState(from) {
+  return sessions.get(from)?.state || "MAIN";
+}
+function setState(from, state) {
+  sessions.set(from, { state });
+}
+function reset(from) {
+  setState(from, "MAIN");
+}
+
+/** Menus */
+const MAIN_MENU =
+  `NutriPilot AI\n\n` +
+  `How can we help you today?\n\n` +
+  `1) Formulation & Diet Control\n` +
+  `2) Performance & Production Intelligence\n` +
+  `3) Raw Materials, Feed Mill & Quality\n` +
+  `4) Expert Review\n` +
+  `5) Nutrition Partner Program\n\n` +
+  `Type MENU anytime to return here.`;
+
+const CORE1_MENU =
+  `Formulation & Diet Control\n\n` +
+  `1) Build a new formula (MVP)\n` +
+  `2) Reformulate an existing diet (next)\n` +
+  `3) Diet approval / risk check (next)\n` +
+  `4) Additives & enzymes guidance (next)\n\n` +
+  `Reply 1 for now, or type BACK / MENU.`;
+
+const CORE2_MENU =
+  `Performance & Production Intelligence\n\n` +
+  `1) Broiler performance issue\n` +
+  `2) Layer performance issue\n` +
+  `3) General production diagnosis\n\n` +
+  `Type BACK / MENU.`;
+
+const CORE3_MENU =
+  `Raw Materials, Feed Mill & Quality\n\n` +
+  `1) Ingredient inclusion limits\n` +
+  `2) Mycotoxin / raw material risk\n` +
+  `3) Pellet quality / milling issues\n\n` +
+  `Type BACK / MENU.`;
+
+const CORE4_MENU =
+  `Expert Review\n\n` +
+  `1) Submit a case for expert review\n` +
+  `2) What information to provide\n\n` +
+  `Type BACK / MENU.`;
+
+const CORE5_MENU =
+  `Nutrition Partner Program\n\n` +
+  `1) What you get (scope)\n` +
+  `2) Pricing / contracts (later)\n` +
+  `3) Start onboarding (later)\n\n` +
+  `Type BACK / MENU.`;
+
+app.post("/whatsapp", (req, res) => {
+  const from = req.body.From || "unknown";
+  const raw = (req.body.Body || "").trim();
+  const msg = raw.toLowerCase();
 
   const twiml = new twilio.twiml.MessagingResponse();
 
-  // Show menu on greeting or menu request
-  if (
-    incomingMsg === "" ||
-    incomingMsg === "hi" ||
-    incomingMsg === "hello" ||
-    incomingMsg === "start" ||
-    incomingMsg === "menu"
-  ) {
-    twiml.message(menu);
-  } else {
-    // For now, always echo and show menu again
-    twiml.message(`✅ Received: "${req.body.Body}"\n\n${menu}`);
+  // Global commands
+  if (msg === "menu" || msg === "start" || msg === "hi" || msg === "hello" || msg === "") {
+    reset(from);
+    twiml.message(MAIN_MENU);
+    res.type("text/xml");
+    return res.send(twiml.toString());
+  }
+  if (msg === "back") {
+    reset(from);
+    twiml.message(MAIN_MENU);
+    res.type("text/xml");
+    return res.send(twiml.toString());
   }
 
-  res.set("Content-Type", "text/xml");
-  res.status(200).send(twiml.toString());
+  const state = getState(from);
+
+  // MAIN selection
+  if (state === "MAIN") {
+    if (msg === "1") {
+      setState(from, "CORE1");
+      twiml.message(CORE1_MENU);
+    } else if (msg === "2") {
+      setState(from, "CORE2");
+      twiml.message(CORE2_MENU);
+    } else if (msg === "3") {
+      setState(from, "CORE3");
+      twiml.message(CORE3_MENU);
+    } else if (msg === "4") {
+      setState(from, "CORE4");
+      twiml.message(CORE4_MENU);
+    } else if (msg === "5") {
+      setState(from, "CORE5");
+      twiml.message(CORE5_MENU);
+    } else {
+      twiml.message(`✅ Received: "${raw}"\n\n${MAIN_MENU}`);
+    }
+
+    res.type("text/xml");
+    return res.send(twiml.toString());
+  }
+
+  // Core submenus (MVP: just acknowledge + show submenu again)
+  if (state === "CORE1") {
+    if (msg === "1") {
+      twiml.message(
+        `✅ Starting: Build a new formula (MVP)\n\n` +
+          `Next we’ll ask species + phase + available ingredients.\n\n` +
+          `Type BACK / MENU anytime.`
+      );
+      // Next step we’ll add the actual intake questions
+    } else {
+      twiml.message(CORE1_MENU);
+    }
+  } else if (state === "CORE2") {
+    twiml.message(CORE2_MENU);
+  } else if (state === "CORE3") {
+    twiml.message(CORE3_MENU);
+  } else if (state === "CORE4") {
+    twiml.message(CORE4_MENU);
+  } else if (state === "CORE5") {
+    twiml.message(CORE5_MENU);
+  } else {
+    reset(from);
+    twiml.message(MAIN_MENU);
+  }
+
+  res.type("text/xml");
+  res.send(twiml.toString());
 });
 
-// Render requires this
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`NutriPilot AI running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`NutriPilot AI running on port ${PORT}`));
