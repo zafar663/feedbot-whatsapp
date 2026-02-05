@@ -78,6 +78,8 @@ function parsePastedFormula(text) {
   return items.slice(0, 80);
 }
 
+}
+
 /** Bulk paste parser for manual entry:
  * Lines like:
  *   Corn | 58
