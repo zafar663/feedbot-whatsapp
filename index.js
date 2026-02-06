@@ -4,11 +4,25 @@ const express = require("express");
 const twilio = require("twilio");
 
 const app = express();
-
-// Twilio sends x-www-form-urlencoded
 app.use(express.urlencoded({ extended: false }));
 
-const VERSION = "NutriPilot AI v3 – Formula Review Intake Stable ✅";
+const VERSION = "NutriPilot AI v4 – State enabled (stable) ✅";
+
+/* =========================
+   SIMPLE SESSION STORE
+========================= */
+const sessions = {};
+
+function getSession(from) {
+  if (!sessions[from]) {
+    sessions[from] = { state: "MAIN" };
+  }
+  return sessions[from];
+}
+
+function resetSession(from) {
+  sessions[from] = { state: "MAIN" };
+}
 
 /* =========================
    MENUS
@@ -59,52 +73,70 @@ app.get(["/", "/whatsapp"], (req, res) => {
    WHATSAPP WEBHOOK
 ========================= */
 app.post(["/", "/whatsapp"], (req, res) => {
+  const from = req.body.From || "unknown";
   const raw = req.body.Body || "";
   const msg = raw.trim().toLowerCase();
+
   const twiml = new twilio.twiml.MessagingResponse();
+  const session = getSession(from);
 
   // Global commands
   if (!msg || ["hi", "hello", "menu", "start"].includes(msg)) {
+    resetSession(from);
     twiml.message(MAIN_MENU);
     return res.type("text/xml").send(twiml.toString());
   }
 
-  // MAIN MENU
-  if (msg === "1") {
+  /* ===== MAIN MENU ===== */
+  if (session.state === "MAIN") {
+    if (msg === "1") {
+      session.state = "FORMULATION_MENU";
+      twiml.message(FORMULATION_MENU);
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    twiml.message(MAIN_MENU);
+    return res.type("text/xml").send(twiml.toString());
+  }
+
+  /* ===== FORMULATION MENU ===== */
+  if (session.state === "FORMULATION_MENU") {
+    if (msg === "1") {
+      session.state = "FORMULA_REVIEW_INPUT";
+      twiml.message(FORMULA_REVIEW_INPUT);
+      return res.type("text/xml").send(twiml.toString());
+    }
+
     twiml.message(FORMULATION_MENU);
     return res.type("text/xml").send(twiml.toString());
   }
 
-  // FORMULATION MENU
-  if (msg === "1" || msg === "formula review") {
+  /* ===== FORMULA REVIEW INPUT ===== */
+  if (session.state === "FORMULA_REVIEW_INPUT") {
+    if (msg === "1") {
+      twiml.message(
+        "✅ Paste your full formula now.\n\n" +
+        "Example:\nCorn 58; SBM44% 28; Oil 3; Salt 0.3\n\n" +
+        "Type MENU to cancel."
+      );
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    if (msg === "2") {
+      twiml.message(
+        "✅ Manual entry selected.\n\n" +
+        "You will enter ingredient name and %.\n\n" +
+        "Type MENU to cancel."
+      );
+      return res.type("text/xml").send(twiml.toString());
+    }
+
     twiml.message(FORMULA_REVIEW_INPUT);
     return res.type("text/xml").send(twiml.toString());
   }
 
-  // FORMULA REVIEW INPUT (ack only)
-  if (msg === "1") {
-    twiml.message(
-      "✅ Paste your full formula now.\n\n" +
-      "Example:\nCorn 58; SBM44% 28; Oil 3; Salt 0.3\n\n" +
-      "Type MENU to cancel."
-    );
-    return res.type("text/xml").send(twiml.toString());
-  }
-
-  if (msg === "2") {
-    twiml.message(
-      "✅ Manual entry selected.\n\n" +
-      "You’ll enter ingredient name and %.\n\n" +
-      "Type MENU to cancel."
-    );
-    return res.type("text/xml").send(twiml.toString());
-  }
-
-  // Fallback
-  twiml.message(
-    "Please choose a valid option.\n\n" +
-    "Type MENU to restart."
-  );
+  /* ===== FALLBACK ===== */
+  twiml.message("Type MENU to restart.");
   return res.type("text/xml").send(twiml.toString());
 });
 
