@@ -6,23 +6,7 @@ const twilio = require("twilio");
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 
-const VERSION = "NutriPilot AI v4 – State enabled (stable) ✅";
-
-/* =========================
-   SIMPLE SESSION STORE
-========================= */
-const sessions = {};
-
-function getSession(from) {
-  if (!sessions[from]) {
-    sessions[from] = { state: "MAIN" };
-  }
-  return sessions[from];
-}
-
-function resetSession(from) {
-  sessions[from] = { state: "MAIN" };
-}
+const VERSION = "NutriPilot AI v5 – Keyword-based (stable) ✅";
 
 /* =========================
    MENUS
@@ -43,24 +27,14 @@ Reply with a number or type MENU.`;
 const FORMULATION_MENU =
 `Formulation & Diet Control
 
-1) Formula review (MVP)
-2) Reformulation (next)
-3) Diet approval / risk check (next)
-4) Additives & enzymes guidance (next)
+Type one of the following commands:
 
-Reply 1 for now, or type MENU.`;
+REVIEW   – Formula review (MVP)
+REFORM   – Reformulation (next)
+APPROVE  – Diet approval / risk check (next)
+ADDITIVE – Additives & enzymes guidance (next)
 
-const FORMULA_REVIEW_INPUT =
-`Formula Review – Submit your diet
-
-Choose how you want to submit the formula:
-
-1) Paste full formula (any format)
-2) Manual entry (% only)
-3) Upload file (Excel / CSV – coming next)
-4) Upload photo (coming next)
-
-Reply 1 or 2 for now, or type MENU.`;
+Type MENU anytime.`;
 
 /* =========================
    HEALTH CHECK
@@ -73,70 +47,66 @@ app.get(["/", "/whatsapp"], (req, res) => {
    WHATSAPP WEBHOOK
 ========================= */
 app.post(["/", "/whatsapp"], (req, res) => {
-  const from = req.body.From || "unknown";
   const raw = req.body.Body || "";
-  const msg = raw.trim().toLowerCase();
+  const msg = raw.trim().toUpperCase();
 
   const twiml = new twilio.twiml.MessagingResponse();
-  const session = getSession(from);
 
   // Global commands
-  if (!msg || ["hi", "hello", "menu", "start"].includes(msg)) {
-    resetSession(from);
+  if (!msg || ["HI", "HELLO", "MENU", "START"].includes(msg)) {
     twiml.message(MAIN_MENU);
     return res.type("text/xml").send(twiml.toString());
   }
 
-  /* ===== MAIN MENU ===== */
-  if (session.state === "MAIN") {
-    if (msg === "1") {
-      session.state = "FORMULATION_MENU";
-      twiml.message(FORMULATION_MENU);
-      return res.type("text/xml").send(twiml.toString());
-    }
-
-    twiml.message(MAIN_MENU);
-    return res.type("text/xml").send(twiml.toString());
-  }
-
-  /* ===== FORMULATION MENU ===== */
-  if (session.state === "FORMULATION_MENU") {
-    if (msg === "1") {
-      session.state = "FORMULA_REVIEW_INPUT";
-      twiml.message(FORMULA_REVIEW_INPUT);
-      return res.type("text/xml").send(twiml.toString());
-    }
-
+  // Main menu
+  if (msg === "1") {
     twiml.message(FORMULATION_MENU);
     return res.type("text/xml").send(twiml.toString());
   }
 
-  /* ===== FORMULA REVIEW INPUT ===== */
-  if (session.state === "FORMULA_REVIEW_INPUT") {
-    if (msg === "1") {
-      twiml.message(
-        "✅ Paste your full formula now.\n\n" +
-        "Example:\nCorn 58; SBM44% 28; Oil 3; Salt 0.3\n\n" +
-        "Type MENU to cancel."
-      );
-      return res.type("text/xml").send(twiml.toString());
-    }
-
-    if (msg === "2") {
-      twiml.message(
-        "✅ Manual entry selected.\n\n" +
-        "You will enter ingredient name and %.\n\n" +
-        "Type MENU to cancel."
-      );
-      return res.type("text/xml").send(twiml.toString());
-    }
-
-    twiml.message(FORMULA_REVIEW_INPUT);
+  // Keyword-based routing (STATELESS)
+  if (msg === "REVIEW") {
+    twiml.message(
+      `Formula Review – Submit your diet\n\n` +
+      `Paste your full formula now (any format).\n\n` +
+      `Example:\nCorn 58; SBM44% 28; Oil 3; Salt 0.3\n\n` +
+      `Type MENU to cancel.`
+    );
     return res.type("text/xml").send(twiml.toString());
   }
 
-  /* ===== FALLBACK ===== */
-  twiml.message("Type MENU to restart.");
+  if (msg === "REFORM") {
+    twiml.message(
+      `Reformulation support (coming next).\n\n` +
+      `This module will suggest cost- and performance-driven reformulations.\n\n` +
+      `Type MENU to return.`
+    );
+    return res.type("text/xml").send(twiml.toString());
+  }
+
+  if (msg === "APPROVE") {
+    twiml.message(
+      `Diet approval & risk check (coming next).\n\n` +
+      `This will validate compliance, safety margins, and production risks.\n\n` +
+      `Type MENU to return.`
+    );
+    return res.type("text/xml").send(twiml.toString());
+  }
+
+  if (msg === "ADDITIVE") {
+    twiml.message(
+      `Additives & enzymes guidance (coming next).\n\n` +
+      `This module will evaluate enzyme fit, ROI, and inclusion strategy.\n\n` +
+      `Type MENU to return.`
+    );
+    return res.type("text/xml").send(twiml.toString());
+  }
+
+  // Fallback
+  twiml.message(
+    `Unrecognized input.\n\n` +
+    `Type MENU to see available options.`
+  );
   return res.type("text/xml").send(twiml.toString());
 });
 
