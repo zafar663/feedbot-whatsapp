@@ -8,7 +8,7 @@ const app = express();
 // Twilio sends x-www-form-urlencoded
 app.use(express.urlencoded({ extended: false }));
 
-const VERSION = "NutriPilot AI v2 – Main Menu + Formulation Submenu ✅";
+const VERSION = "NutriPilot AI v3 – Formula Review Intake Stable ✅";
 
 /* =========================
    MENUS
@@ -36,6 +36,18 @@ const FORMULATION_MENU =
 
 Reply 1 for now, or type MENU.`;
 
+const FORMULA_REVIEW_INPUT =
+`Formula Review – Submit your diet
+
+Choose how you want to submit the formula:
+
+1) Paste full formula (any format)
+2) Manual entry (% only)
+3) Upload file (Excel / CSV – coming next)
+4) Upload photo (coming next)
+
+Reply 1 or 2 for now, or type MENU.`;
+
 /* =========================
    HEALTH CHECK
 ========================= */
@@ -47,41 +59,53 @@ app.get(["/", "/whatsapp"], (req, res) => {
    WHATSAPP WEBHOOK
 ========================= */
 app.post(["/", "/whatsapp"], (req, res) => {
-  const bodyRaw = req.body.Body || "";
-  const body = bodyRaw.trim().toLowerCase();
+  const raw = req.body.Body || "";
+  const msg = raw.trim().toLowerCase();
   const twiml = new twilio.twiml.MessagingResponse();
 
   // Global commands
-  if (!body || ["hi", "hello", "menu", "start"].includes(body)) {
+  if (!msg || ["hi", "hello", "menu", "start"].includes(msg)) {
     twiml.message(MAIN_MENU);
-    res.type("text/xml").send(twiml.toString());
-    return;
+    return res.type("text/xml").send(twiml.toString());
   }
 
-  // Main menu selection
-  if (body === "1") {
+  // MAIN MENU
+  if (msg === "1") {
     twiml.message(FORMULATION_MENU);
-    res.type("text/xml").send(twiml.toString());
-    return;
+    return res.type("text/xml").send(twiml.toString());
   }
 
-  // Formulation submenu (only option 1 active)
-  if (body === "1" || body === "formula review") {
+  // FORMULATION MENU
+  if (msg === "1" || msg === "formula review") {
+    twiml.message(FORMULA_REVIEW_INPUT);
+    return res.type("text/xml").send(twiml.toString());
+  }
+
+  // FORMULA REVIEW INPUT (ack only)
+  if (msg === "1") {
     twiml.message(
-      "✅ Formula review selected.\n\n" +
-      "Next step (coming next): submit your formula for analysis.\n\n" +
-      "Type MENU to go back."
+      "✅ Paste your full formula now.\n\n" +
+      "Example:\nCorn 58; SBM44% 28; Oil 3; Salt 0.3\n\n" +
+      "Type MENU to cancel."
     );
-    res.type("text/xml").send(twiml.toString());
-    return;
+    return res.type("text/xml").send(twiml.toString());
+  }
+
+  if (msg === "2") {
+    twiml.message(
+      "✅ Manual entry selected.\n\n" +
+      "You’ll enter ingredient name and %.\n\n" +
+      "Type MENU to cancel."
+    );
+    return res.type("text/xml").send(twiml.toString());
   }
 
   // Fallback
   twiml.message(
-    "Please reply with a valid option.\n\n" +
-    "Type MENU to see available options."
+    "Please choose a valid option.\n\n" +
+    "Type MENU to restart."
   );
-  res.type("text/xml").send(twiml.toString());
+  return res.type("text/xml").send(twiml.toString());
 });
 
 /* =========================
