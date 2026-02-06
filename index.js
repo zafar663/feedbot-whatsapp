@@ -8,8 +8,11 @@ const app = express();
 // Twilio sends x-www-form-urlencoded
 app.use(express.urlencoded({ extended: false }));
 
-const VERSION = "NutriPilot AI v1 – Main Menu Stable ✅";
+const VERSION = "NutriPilot AI v2 – Main Menu + Formulation Submenu ✅";
 
+/* =========================
+   MENUS
+========================= */
 const MAIN_MENU =
 `NutriPilot AI
 
@@ -23,26 +26,66 @@ How can we help you today?
 
 Reply with a number or type MENU.`;
 
-// Health check (browser)
+const FORMULATION_MENU =
+`Formulation & Diet Control
+
+1) Formula review (MVP)
+2) Reformulation (next)
+3) Diet approval / risk check (next)
+4) Additives & enzymes guidance (next)
+
+Reply 1 for now, or type MENU.`;
+
+/* =========================
+   HEALTH CHECK
+========================= */
 app.get(["/", "/whatsapp"], (req, res) => {
   res.status(200).send(VERSION);
 });
 
-// WhatsApp webhook (accept both / and /whatsapp)
+/* =========================
+   WHATSAPP WEBHOOK
+========================= */
 app.post(["/", "/whatsapp"], (req, res) => {
-  const body = (req.body.Body || "").trim().toLowerCase();
+  const bodyRaw = req.body.Body || "";
+  const body = bodyRaw.trim().toLowerCase();
   const twiml = new twilio.twiml.MessagingResponse();
 
-  // Always respond
+  // Global commands
   if (!body || ["hi", "hello", "menu", "start"].includes(body)) {
     twiml.message(MAIN_MENU);
-  } else {
-    twiml.message(`✅ Received: "${req.body.Body}"\n\n${MAIN_MENU}`);
+    res.type("text/xml").send(twiml.toString());
+    return;
   }
 
-  res.set("Content-Type", "text/xml");
-  res.status(200).send(twiml.toString());
+  // Main menu selection
+  if (body === "1") {
+    twiml.message(FORMULATION_MENU);
+    res.type("text/xml").send(twiml.toString());
+    return;
+  }
+
+  // Formulation submenu (only option 1 active)
+  if (body === "1" || body === "formula review") {
+    twiml.message(
+      "✅ Formula review selected.\n\n" +
+      "Next step (coming next): submit your formula for analysis.\n\n" +
+      "Type MENU to go back."
+    );
+    res.type("text/xml").send(twiml.toString());
+    return;
+  }
+
+  // Fallback
+  twiml.message(
+    "Please reply with a valid option.\n\n" +
+    "Type MENU to see available options."
+  );
+  res.type("text/xml").send(twiml.toString());
 });
 
+/* =========================
+   SERVER
+========================= */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(VERSION));
