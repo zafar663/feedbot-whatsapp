@@ -7,7 +7,7 @@ const Redis = require("ioredis");
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 
-const VERSION = "NutriPilot AI vFinal ✅ (All animals + Poultry split + Separate genetic lines + Full egg-layer stages + Redis sessions)";
+const VERSION = "NutriPilot AI vFinal+BulkPaste ✅ (All animals + Poultry split + Separate genetic lines + Full egg-layer stages + Redis sessions + Bulk Paste)";
 
 // -------------------- Redis (prevents sleep/mix) --------------------
 const REDIS_URL = process.env.REDIS_URL || "";
@@ -19,7 +19,7 @@ if (REDIS_URL) {
   redis.on("error", () => {});
 }
 
-// Fallback (only if Redis not set) — state may reset on sleep
+// Fallback (only if Redis not set)
 const mem = new Map();
 
 async function getSession(from) {
@@ -53,36 +53,39 @@ async function resetSession(from) {
 function makeFreshSession() {
   return {
     state: "MAIN",
-    ctx: {},             // animal/poultry/genetics/stage/feedform
-    formula: [],          // [{name, pct}]
+    ctx: {},      // animal/poultry/genetics/stage/feedform
+    formula: [],  // [{name, pct}]
   };
 }
 
 // -------------------- Helpers --------------------
-function normUpper(x) {
-  return String(x || "").trim().toUpperCase();
-}
-function normLower(x) {
-  return String(x || "").trim().toLowerCase();
-}
+function normUpper(x) { return String(x || "").trim().toUpperCase(); }
+function normLower(x) { return String(x || "").trim().toLowerCase(); }
+
 function firstDigit(x) {
   const m = String(x || "").trim().match(/^([1-9])$/);
   return m ? m[1] : null;
 }
+
 function safeNum(x) {
-  const s = String(x || "").replace(/o\./gi, "0.").replace(/[^0-9.\-]/g, "");
+  const s = String(x || "")
+    .replace(/o\./gi, "0.")         // common typo: o.122 -> 0.122
+    .replace(/[^\d.\-]/g, "");      // strip non-numeric (keeps dot and minus)
   const n = Number(s);
   return Number.isFinite(n) ? n : null;
 }
+
+function sumPct(items) {
+  return items.reduce((s, it) => s + (safeNum(it.pct) || 0), 0);
+}
+
 function listFormula(items) {
   if (!items.length) return "No ingredients added yet.";
   const lines = items.slice(0, 25).map((it, i) => `${i + 1}) ${it.name} — ${it.pct}%`);
   const more = items.length > 25 ? `\n...and ${items.length - 25} more` : "";
   return `Current formula:\n${lines.join("\n")}${more}`;
 }
-function sumPct(items) {
-  return items.reduce((s, it) => s + (safeNum(it.pct) || 0), 0);
-}
+
 function removeByName(items, name) {
   const key = normLower(name);
   const before = items.length;
@@ -90,7 +93,7 @@ function removeByName(items, name) {
   return { after, removed: after.length !== before };
 }
 
-// Parses: "ADD Maize 27.45" OR "Maize 27.45"
+// Strict line: "ADD Maize 27.45" OR "Maize 27.45"
 function parseAddLine(text) {
   const raw = String(text || "").trim();
   if (!raw) return null;
@@ -104,6 +107,33 @@ function parseAddLine(text) {
 
   if (!name || pct === null) return null;
   return { name, pct };
+}
+
+// Flexible token for bulk paste: accepts "Maize27.45," "SBM44% 25.34" "Millet/Bajra 4,"
+function parseTokenFlexible(token) {
+  const t = String(token || "").trim().replace(/^[\-\u2022•\*]+\s*/g, ""); // remove bullet starts
+  if (!t) return null;
+
+  // remove trailing punctuation
+  const cleaned = t.replace(/[,;]+$/g, "").trim();
+
+  // try to capture last number at end (space or no-space)
+  const m = cleaned.match(/^(.*?)(-?\d+(?:\.\d+)?)\s*%?\s*$/);
+  if (!m) return null;
+
+  const name = m[1].trim().replace(/[:\-]+$/g, "").trim();
+  const pct = safeNum(m[2]);
+  if (!name || pct === null) return null;
+
+  return { name, pct };
+}
+
+function splitBulkText(text) {
+  // split by newline, semicolon, comma
+  return String(text || "")
+    .split(/[\n;\r]+|,(?!\d)/g) // comma split but avoids some numeric formats; still OK for our use
+    .map(s => s.trim())
+    .filter(Boolean);
 }
 
 // -------------------- Menus --------------------
@@ -153,7 +183,6 @@ const POULTRY_CATEGORY_MENU =
 
 Reply 1–4.`;
 
-// Separate genetic lines (LOCKED)
 const GENETIC_BROILER_MENU =
 `Select genetic line:
 1) Ross
@@ -174,7 +203,6 @@ const GENETIC_LAYER_MENU =
 
 Reply 1–5.`;
 
-// Full stages for egg-laying birds (LOCKED Option B)
 const EGG_LAYER_STAGE_MENU =
 `Select life stage (egg-laying birds):
 
@@ -214,11 +242,11 @@ const INPUT_METHOD_MENU =
 Choose input method:
 
 1) Guided manual entry (% only)
-2) Bulk paste (% only) (next)
+2) Bulk paste (% only)
 3) Upload Excel/CSV (next)
 4) Upload photo/PDF (next)
 
-Reply 1 for now, or type MENU.`;
+Reply 1 or 2 for now, or type MENU.`;
 
 function nonPoultryStageMenu(animal) {
   switch (animal) {
@@ -292,20 +320,22 @@ function feedFormLabel(n) {
   return map[n] || null;
 }
 
-// -------------------- Manual Entry Instructions --------------------
-function manualEntryHelp(ctx) {
-  const ctxLines = [
+// -------------------- Manual/Bulk Help --------------------
+function contextBlock(ctx) {
+  return [
     `Animal: ${ctx.animal || "-"}`,
     ctx.poultryCategory ? `Poultry: ${ctx.poultryCategory}` : null,
     ctx.geneticLine ? `Genetic line: ${ctx.geneticLine}` : null,
     ctx.stage ? `Stage: ${ctx.stage}` : null,
     ctx.feedForm ? `Feed form: ${ctx.feedForm}` : null,
   ].filter(Boolean).join("\n");
+}
 
+function manualEntryHelp(ctx) {
   return (
 `Manual Entry (% only)
 
-${ctxLines}
+${contextBlock(ctx)}
 
 Send each ingredient in ONE message:
 ADD <ingredient name> <percent>
@@ -314,6 +344,28 @@ Examples:
 ADD Maize 27.45
 ADD SBM44% 25.34
 ADD Salt 0.30
+
+Commands:
+LIST
+REMOVE <ingredient name>
+DONE
+MENU`
+  );
+}
+
+function bulkPasteHelp(ctx) {
+  return (
+`Bulk Paste (% only)
+
+${contextBlock(ctx)}
+
+Paste your formula in any format (comma/newline/semicolon).
+
+Examples:
+Maize27.45, SBM44% 25.34
+Rice broken 15
+Fishmeal54%12.26
+Salt 0.30
 
 Commands:
 LIST
@@ -335,13 +387,7 @@ function buildMvpReport(ctx, formula) {
   if (!hasSalt) flags.push("Salt not detected (check Na/Cl source).");
   if (!hasPremix) flags.push("Premix not detected (vit/min premix may be missing).");
 
-  const ctxBlock = [
-    `Animal: ${ctx.animal}`,
-    ctx.poultryCategory ? `Poultry: ${ctx.poultryCategory}` : null,
-    ctx.geneticLine ? `Genetic line: ${ctx.geneticLine}` : null,
-    ctx.stage ? `Stage: ${ctx.stage}` : null,
-    ctx.feedForm ? `Feed form: ${ctx.feedForm}` : null
-  ].filter(Boolean).join("\n");
+  const ctxBlock = contextBlock(ctx);
 
   const top = formula.slice(0, 20).map(it => `- ${it.name}: ${it.pct}%`).join("\n");
 
@@ -381,7 +427,7 @@ app.post(["/", "/whatsapp"], async (req, res) => {
 
   // Global: MENU/START/HI resets
   if (!msgLower || ["hi","hello","menu","start"].includes(msgLower)) {
-    const s = await resetSession(from);
+    await resetSession(from);
     twiml.message(MAIN_MENU);
     return res.type("text/xml").send(twiml.toString());
   }
@@ -460,14 +506,10 @@ app.post(["/", "/whatsapp"], async (req, res) => {
     }
     s.ctx.poultryCategory = cat;
 
-    // genetic line separate (LOCKED)
     s.state = "POULTRY_GENETIC";
     await saveSession(from, s);
-    if (cat === "Layer" || cat === "Layer Breeder") {
-      twiml.message(GENETIC_LAYER_MENU);
-    } else {
-      twiml.message(GENETIC_BROILER_MENU);
-    }
+    if (cat === "Layer" || cat === "Layer Breeder") twiml.message(GENETIC_LAYER_MENU);
+    else twiml.message(GENETIC_BROILER_MENU);
     return res.type("text/xml").send(twiml.toString());
   }
 
@@ -485,15 +527,11 @@ app.post(["/", "/whatsapp"], async (req, res) => {
     }
     s.ctx.geneticLine = gl;
 
-    // stage: broiler meat vs egg-layer full stages (LOCKED)
     s.state = "POULTRY_STAGE";
     await saveSession(from, s);
 
-    if (s.ctx.poultryCategory === "Broiler") {
-      twiml.message(BROILER_STAGE_MENU);
-    } else {
-      twiml.message(EGG_LAYER_STAGE_MENU);
-    }
+    if (s.ctx.poultryCategory === "Broiler") twiml.message(BROILER_STAGE_MENU);
+    else twiml.message(EGG_LAYER_STAGE_MENU);
     return res.type("text/xml").send(twiml.toString());
   }
 
@@ -516,13 +554,11 @@ app.post(["/", "/whatsapp"], async (req, res) => {
     return res.type("text/xml").send(twiml.toString());
   }
 
-  // NON-POULTRY STAGE (store label simply)
+  // NON-POULTRY STAGE
   if (s.state === "NONPOULTRY_STAGE") {
-    // store the exact line mapped by menu number
     const animal = s.ctx.animal;
     const menu = nonPoultryStageMenu(animal);
     const lines = menu.split("\n").filter(Boolean);
-    // find a line that starts with `${d})`
     const picked = lines.find(l => l.trim().startsWith(`${d})`));
     if (!picked) {
       twiml.message(`${menu}\n\n${VERSION}`);
@@ -558,6 +594,13 @@ app.post(["/", "/whatsapp"], async (req, res) => {
       s.formula = [];
       await saveSession(from, s);
       twiml.message(manualEntryHelp(s.ctx));
+      return res.type("text/xml").send(twiml.toString());
+    }
+    if (d === "2") {
+      s.state = "BULK_PASTE";
+      s.formula = [];
+      await saveSession(from, s);
+      twiml.message(bulkPasteHelp(s.ctx));
       return res.type("text/xml").send(twiml.toString());
     }
     twiml.message(INPUT_METHOD_MENU);
@@ -596,7 +639,6 @@ app.post(["/", "/whatsapp"], async (req, res) => {
       return res.type("text/xml").send(twiml.toString());
     }
 
-    // ADD line
     const item = parseAddLine(raw);
     if (!item) {
       twiml.message(`I couldn’t read that.\n\n${manualEntryHelp(s.ctx)}`);
@@ -604,9 +646,7 @@ app.post(["/", "/whatsapp"], async (req, res) => {
     }
 
     s.formula.push(item);
-    // cap size
-    if (s.formula.length > 120) s.formula = s.formula.slice(0, 120);
-
+    if (s.formula.length > 200) s.formula = s.formula.slice(0, 200);
     await saveSession(from, s);
 
     const total = sumPct(s.formula);
@@ -615,6 +655,68 @@ app.post(["/", "/whatsapp"], async (req, res) => {
       `Items: ${s.formula.length} | Total: ${total.toFixed(2)}%\n\n` +
       `Send next: ADD <name> <pct>\n` +
       `Or LIST / REMOVE <name> / DONE\n\n${VERSION}`
+    );
+    return res.type("text/xml").send(twiml.toString());
+  }
+
+  // BULK PASTE
+  if (s.state === "BULK_PASTE") {
+    const up = msgUpper;
+
+    if (up === "LIST") {
+      twiml.message(`${listFormula(s.formula)}\n\n${VERSION}`);
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    if (up.startsWith("REMOVE ")) {
+      const name = raw.trim().slice(7).trim();
+      const out = removeByName(s.formula, name);
+      s.formula = out.after;
+      await saveSession(from, s);
+      twiml.message(
+        (out.removed ? `✅ Removed: ${name}\n\n` : `Couldn't find: ${name}\n\n`) +
+        `${listFormula(s.formula)}\n\nPaste more lines, or type DONE.\n\n${VERSION}`
+      );
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    if (up === "DONE") {
+      if (s.formula.length < 2) {
+        twiml.message(`Please paste at least 2 ingredients first.\n\n${bulkPasteHelp(s.ctx)}`);
+        return res.type("text/xml").send(twiml.toString());
+      }
+      const report = buildMvpReport(s.ctx, s.formula);
+      await resetSession(from);
+      twiml.message(report);
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    // parse bulk paste content
+    const parts = splitBulkText(raw);
+    let added = 0;
+    let bad = 0;
+
+    for (const p of parts) {
+      const item = parseTokenFlexible(p);
+      if (!item) { bad++; continue; }
+      s.formula.push(item);
+      added++;
+      if (s.formula.length > 200) {
+        s.formula = s.formula.slice(0, 200);
+        break;
+      }
+    }
+
+    await saveSession(from, s);
+
+    const total = sumPct(s.formula);
+
+    twiml.message(
+      `✅ Bulk paste processed.\n` +
+      `Added: ${added} | Unreadable: ${bad}\n` +
+      `Items: ${s.formula.length} | Total: ${total.toFixed(2)}%\n\n` +
+      `You can paste more, or type DONE.\n` +
+      `Commands: LIST / REMOVE <name> / DONE / MENU\n\n${VERSION}`
     );
     return res.type("text/xml").send(twiml.toString());
   }
