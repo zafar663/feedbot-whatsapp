@@ -7,7 +7,7 @@ const Redis = require("ioredis");
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 
-const VERSION = "NutriPilot AI vFinal+BulkPaste v2 ✅ (Fix CP tags + o.122/.122 parsing)";
+const VERSION = "NutriPilot AI vFinal+BulkPaste v3 ✅ (Lab-assisted DM+CP for majors ≥10%)";
 
 // -------------------- Redis (prevents sleep/mix) --------------------
 const REDIS_URL = process.env.REDIS_URL || "";
@@ -53,8 +53,15 @@ async function resetSession(from) {
 function makeFreshSession() {
   return {
     state: "MAIN",
-    ctx: {},
-    formula: [],
+    ctx: {},                 // animal/poultry/genetics/stage/feedform
+    formula: [],             // [{name, pct}]
+    // Lab-assisted flow
+    estimateMode: null,      // "quick" | "lab"
+    majorQueue: [],          // [{name, pct}]
+    majorIdx: 0,
+    lab: {
+      overrides: {}          // key=normalized ingredient name -> {dm, cpDm}  (percent)
+    }
   };
 }
 
@@ -67,18 +74,24 @@ function firstDigit(x) {
   return m ? m[1] : null;
 }
 
-// Convert common numeric typos: o.122 -> 0.122 , .122 -> 0.122
 function normalizeNumericTypos(text) {
   return String(text || "")
-    .replace(/o\./gi, "0.")
-    .replace(/(^|[^\d])\.(\d+)/g, "$10.$2"); // ".122" or " x.122" -> "0.122"
+    .replace(/o\./gi, "0.")                 // o.122 -> 0.122
+    .replace(/(^|[^\d])\.(\d+)/g, "$10.$2") // .122 -> 0.122
+    .replace(/,\s*(\d)/g, ".$1");           // 0,12 -> 0.12 (basic EU decimal)
 }
 
 function safeNum(x) {
-  const s = normalizeNumericTypos(x)
-    .replace(/[^\d.\-]/g, ""); // keep digits dot minus
+  const s = normalizeNumericTypos(x).replace(/[^\d.\-]/g, "");
   const n = Number(s);
   return Number.isFinite(n) ? n : null;
+}
+
+function extractNumbers(text) {
+  const t = normalizeNumericTypos(text);
+  const m = t.match(/-?(?:\d*\.\d+|\d+)/g);
+  if (!m) return [];
+  return m.map(x => Number(x)).filter(n => Number.isFinite(n));
 }
 
 function sumPct(items) {
@@ -104,17 +117,18 @@ function parseAddLine(text) {
   const raw0 = String(text || "").trim();
   if (!raw0) return null;
 
-  const raw = normalizeNumericTypos(raw0).replace(/[,;]+$/g, "").trim(); // allow trailing commas
+  const raw = normalizeNumericTypos(raw0).replace(/[,;]+$/g, "").trim();
   const withoutAdd = raw.replace(/^ADD\s+/i, "");
 
-  // last number at end = inclusion (supports 0.122 and .122)
+  // last number at end = inclusion
   const m = withoutAdd.match(/^(.*?)(-?(?:\d*\.\d+|\d+))\s*%?\s*$/);
   if (!m) return null;
 
   const name = m[1].trim().replace(/[:\-]+$/g, "").trim();
   const pct = safeNum(m[2]);
-
   if (!name || pct === null) return null;
+  if (pct > 100) return null;
+
   return { name, pct };
 }
 
@@ -124,28 +138,22 @@ function parseTokenFlexible(token) {
   if (!t0) return null;
 
   const t1 = normalizeNumericTypos(t0)
-    .replace(/^[\-\u2022•\*]+\s*/g, "") // bullets
-    .replace(/[,;]+$/g, "")            // trailing punctuation
+    .replace(/^[\-\u2022•\*]+\s*/g, "")
+    .replace(/[,;]+$/g, "")
     .trim();
 
-  // last number at end = inclusion
   const m = t1.match(/^(.*?)(-?(?:\d*\.\d+|\d+))\s*%?\s*$/);
   if (!m) return null;
 
   const name = m[1].trim().replace(/[:\-]+$/g, "").trim();
   const pct = safeNum(m[2]);
-
   if (!name || pct === null) return null;
-
-  // sanity: if someone still sends >100 due to weird paste, reject it
-  // (inclusion % should never exceed 100)
   if (pct > 100) return null;
 
   return { name, pct };
 }
 
 function splitBulkText(text) {
-  // split by newline or semicolon first, then commas
   const base = String(text || "")
     .split(/[\n;\r]+/g)
     .map(s => s.trim())
@@ -153,11 +161,257 @@ function splitBulkText(text) {
 
   const out = [];
   for (const line of base) {
-    // split commas within a line
     const parts = line.split(",").map(x => x.trim()).filter(Boolean);
     out.push(...parts);
   }
   return out;
+}
+
+function contextBlock(ctx) {
+  return [
+    `Animal: ${ctx.animal || "-"}`,
+    ctx.poultryCategory ? `Poultry: ${ctx.poultryCategory}` : null,
+    ctx.geneticLine ? `Genetic line: ${ctx.geneticLine}` : null,
+    ctx.stage ? `Stage: ${ctx.stage}` : null,
+    ctx.feedForm ? `Feed form: ${ctx.feedForm}` : null,
+  ].filter(Boolean).join("\n");
+}
+
+// -------------------- Simple default nutrient library (DM%, CP% on DM basis) --------------------
+// You can expand later. This is enough for v1.
+function getDefaultDMCP(nameRaw) {
+  const n = normLower(nameRaw);
+
+  // grains / energy
+  if (/(maize|corn)/.test(n)) return { dm: 88, cpDm: 9.0 };
+  if (/(wheat)/.test(n)) return { dm: 88, cpDm: 12.0 };
+  if (/(sorghum|milo)/.test(n)) return { dm: 88, cpDm: 10.0 };
+  if (/(rice broken|broken rice|rice)/.test(n)) return { dm: 88, cpDm: 8.0 };
+  if (/(barley)/.test(n)) return { dm: 88, cpDm: 11.0 };
+  if (/(millet|bajra)/.test(n)) return { dm: 88, cpDm: 11.0 };
+
+  // protein meals
+  if (/(soybean meal|sbm)/.test(n)) return { dm: 89, cpDm: 48.0 };
+  if (/(canola meal|rapeseed meal)/.test(n)) return { dm: 89, cpDm: 38.0 };
+  if (/(sunflower meal)/.test(n)) return { dm: 90, cpDm: 32.0 };
+  if (/(ddgs)/.test(n)) return { dm: 90, cpDm: 30.0 };
+  if (/(fishmeal|fish meal)/.test(n)) return { dm: 92, cpDm: 60.0 };
+  if (/(meat bone|mbm)/.test(n)) return { dm: 93, cpDm: 50.0 };
+  if (/(corn gluten)/.test(n)) return { dm: 90, cpDm: 60.0 };
+
+  // fats/oils (CP=0)
+  if (/(oil|fat|tallow|grease)/.test(n)) return { dm: 99, cpDm: 0.0 };
+
+  // minerals/premix/additives (CP=0; DM ~ 95–99)
+  if (/(salt|nacl)/.test(n)) return { dm: 99, cpDm: 0.0 };
+  if (/(limestone|calcite|calcium carbonate)/.test(n)) return { dm: 98, cpDm: 0.0 };
+  if (/(dcp|mcp|mdcp|phosphate)/.test(n)) return { dm: 98, cpDm: 0.0 };
+  if (/(premix|vitamin|mineral)/.test(n)) return { dm: 95, cpDm: 0.0 };
+  if (/(dlm|methionine|lysine|threonine|valine|tryptophan)/.test(n)) return { dm: 99, cpDm: 0.0 };
+
+  // fallback
+  return { dm: 88, cpDm: 12.0 };
+}
+
+// Extract a CP tag embedded in ingredient name, e.g. "SBM44%" or "Fishmeal54%" or "Sunflower meal26-28%"
+function extractCPTagFromName(nameRaw) {
+  const s = String(nameRaw || "");
+
+  // range like 26-28%
+  const r = s.match(/(\d{1,2})(?:\.\d+)?\s*-\s*(\d{1,2})(?:\.\d+)?\s*%/);
+  if (r) {
+    const a = Number(r[1]), b = Number(r[2]);
+    if (Number.isFinite(a) && Number.isFinite(b) && a > 0 && b > 0) {
+      const mid = (a + b) / 2;
+      // plausible CP range
+      if (mid >= 5 && mid <= 80) return mid;
+    }
+  }
+
+  // single like 44%
+  const m = s.match(/(\d{1,2})(?:\.\d+)?\s*%/);
+  if (m) {
+    const v = Number(m[1]);
+    if (Number.isFinite(v) && v >= 5 && v <= 80) return v;
+  }
+
+  return null;
+}
+
+function calcDietDMCP(formula, overrides) {
+  // overrides: normalized name -> {dm, cpDm}
+  let dmSum = 0;      // sum(inclusion * dm%)
+  let cpKg = 0;       // CP contribution in "percent points" on as-fed basis
+
+  for (const it of formula) {
+    const inc = safeNum(it.pct);
+    if (!Number.isFinite(inc)) continue;
+
+    const key = normLower(it.name);
+    const ov = overrides && overrides[key] ? overrides[key] : null;
+
+    let dm = ov?.dm;
+    let cpDm = ov?.cpDm;
+
+    // if no override cpDm, try CP tag inside name as default CP DM
+    if (cpDm === undefined || cpDm === null) {
+      const tag = extractCPTagFromName(it.name);
+      if (tag !== null) cpDm = tag;
+    }
+
+    const def = getDefaultDMCP(it.name);
+    if (dm === undefined || dm === null) dm = def.dm;
+    if (cpDm === undefined || cpDm === null) cpDm = def.cpDm;
+
+    // Convert CP on DM basis to as-fed CP
+    const cpAsFed = (cpDm * (dm / 100));
+
+    dmSum += inc * dm;
+    cpKg += inc * (cpAsFed / 100); // CP% contribution = inclusion% * (CP_asfed%)/100
+  }
+
+  // Diet DM% = dmSum/100
+  const dietDM = dmSum / 100;
+
+  // Diet CP% (as-fed) = sum contributions
+  const dietCP = cpKg;
+
+  return {
+    dietDM: Number.isFinite(dietDM) ? dietDM : null,
+    dietCP: Number.isFinite(dietCP) ? dietCP : null
+  };
+}
+
+function buildMvpReport(ctx, formula, overrides, modeLabel) {
+  const total = sumPct(formula);
+
+  const names = formula.map(x => normLower(x.name));
+  const hasSalt = names.some(n => n.includes("salt") || n.includes("nacl"));
+  const hasPremix = names.some(n => n.includes("premix"));
+
+  const flags = [];
+  if (total < 99 || total > 101) flags.push(`Total inclusion = ${total.toFixed(2)}% (target ~100%)`);
+  if (!hasSalt) flags.push("Salt not detected (check Na/Cl source).");
+  if (!hasPremix) flags.push("Premix not detected (vit/min premix may be missing).");
+
+  // Micro load check (sum of <0.5%)
+  const microSum = formula.reduce((s, it) => {
+    const p = safeNum(it.pct);
+    if (!Number.isFinite(p)) return s;
+    return p < 0.5 ? s + p : s;
+  }, 0);
+  if (microSum > 2.5) flags.push(`High micro-ingredient load (<0.5% items sum = ${microSum.toFixed(2)}%)`);
+
+  // duplicates (exact same name)
+  const seen = new Set();
+  const dupes = [];
+  for (const it of formula) {
+    const k = normLower(it.name);
+    if (seen.has(k)) dupes.push(it.name);
+    seen.add(k);
+  }
+  if (dupes.length) flags.push(`Duplicate ingredient names detected: ${dupes.slice(0, 3).join(", ")}${dupes.length > 3 ? "…" : ""}`);
+
+  const est = calcDietDMCP(formula, overrides || {});
+  const ctxBlock = contextBlock(ctx);
+  const top = formula.slice(0, 15).map(it => `- ${it.name}: ${it.pct}%`).join("\n");
+
+  const estBlock = [
+    `Estimate mode: ${modeLabel}`,
+    est.dietDM !== null ? `Estimated diet DM: ${est.dietDM.toFixed(1)}%` : `Estimated diet DM: n/a`,
+    est.dietCP !== null ? `Estimated diet CP (as-fed): ${est.dietCP.toFixed(2)}%` : `Estimated diet CP: n/a`,
+  ].join("\n");
+
+  return (
+`✅ Formula Review (MVP + DM/CP estimate)
+
+${ctxBlock}
+
+${estBlock}
+
+Ingredients: ${formula.length}
+Total: ${total.toFixed(2)}%
+
+Top items:
+${top}
+
+${flags.length ? `⚠️ Flags:\n- ${flags.join("\n- ")}` : "✅ No major MVP flags detected."}
+
+Type MENU to start again.
+
+${VERSION}`
+  );
+}
+
+function buildEstimateModeMenu() {
+  return (
+`Nutrient Estimate Mode
+
+1) Quick estimate (defaults)
+2) Lab-assisted estimate (recommended)
+
+Reply 1 or 2.
+(Type MENU anytime)`
+  );
+}
+
+function buildMajorListMessage(majors) {
+  if (!majors.length) {
+    return `No major ingredients (≥10%) detected. Using defaults.\n\n${VERSION}`;
+  }
+  const lines = majors.map((x, i) => `${i + 1}) ${x.name} — ${x.pct}%`).join("\n");
+  return (
+`Major ingredients detected (≥10%):
+
+${lines}
+
+We will ask DM% and CP% for each major ingredient (including grains).
+Reply OK to start, or SKIP to use defaults.`
+  );
+}
+
+function buildAskMajorPrompt(ctx, item) {
+  const key = normLower(item.name);
+  const cpTag = extractCPTagFromName(item.name);
+  const note = cpTag !== null ? `CP tag detected in name: ${cpTag}% (you can override)` : `No CP tag in name (defaults will be used if you SKIP).`;
+
+  return (
+`Lab values needed (Major ingredient)
+
+${contextBlock(ctx)}
+
+Ingredient: ${item.name}
+Inclusion: ${item.pct}%
+
+Send: DM, CP
+Example: 88, 8.5
+
+- DM = dry matter %
+- CP = crude protein % (on DM basis)
+
+Type SKIP to use defaults for this ingredient.
+(Type MENU anytime)
+
+${note}`
+  );
+}
+
+function parseLabReply(text) {
+  const up = normUpper(text);
+  if (up === "SKIP") return { skip: true };
+
+  const nums = extractNumbers(text);
+  if (!nums.length) return { ok: false };
+
+  // DM must be 50–99 typical; CP 0–80
+  const dm = nums[0];
+  const cp = nums.length >= 2 ? nums[1] : null;
+
+  if (!(dm > 40 && dm <= 100)) return { ok: false };
+
+  if (cp !== null && !(cp >= 0 && cp <= 80)) return { ok: false };
+
+  return { ok: true, dm, cp };
 }
 
 // -------------------- Menus --------------------
@@ -267,8 +521,6 @@ Choose input method:
 
 1) Guided manual entry (% only)
 2) Bulk paste (% only)
-3) Upload Excel/CSV (next)
-4) Upload photo/PDF (next)
 
 Reply 1 or 2 for now, or type MENU.`;
 
@@ -344,17 +596,6 @@ function feedFormLabel(n) {
   return map[n] || null;
 }
 
-// -------------------- Help blocks --------------------
-function contextBlock(ctx) {
-  return [
-    `Animal: ${ctx.animal || "-"}`,
-    ctx.poultryCategory ? `Poultry: ${ctx.poultryCategory}` : null,
-    ctx.geneticLine ? `Genetic line: ${ctx.geneticLine}` : null,
-    ctx.stage ? `Stage: ${ctx.stage}` : null,
-    ctx.feedForm ? `Feed form: ${ctx.feedForm}` : null,
-  ].filter(Boolean).join("\n");
-}
-
 function manualEntryHelp(ctx) {
   return (
 `Manual Entry (% only)
@@ -368,7 +609,7 @@ Examples:
 ADD Maize 27.45
 ADD SBM44% 25.34
 ADD Sunflower meal26-28% 5
-ADD DLM99% 0.122
+ADD DLM99% o.122
 
 Commands:
 LIST
@@ -388,7 +629,7 @@ Paste your formula in any format (comma/newline/semicolon).
 
 Examples:
 SBM44% 25.34
-Sunflower meal26-28% 5
+Sunflower meal26-28%5
 DLM99% o.122
 Salt 0.30
 
@@ -397,40 +638,6 @@ LIST
 REMOVE <ingredient name>
 DONE
 MENU`
-  );
-}
-
-// -------------------- MVP Report --------------------
-function buildMvpReport(ctx, formula) {
-  const total = sumPct(formula);
-  const names = formula.map(x => normLower(x.name));
-  const hasSalt = names.some(n => n.includes("salt") || n.includes("nacl"));
-  const hasPremix = names.some(n => n.includes("premix"));
-
-  const flags = [];
-  if (total < 99 || total > 101) flags.push(`Total inclusion = ${total.toFixed(2)}% (target ~100%)`);
-  if (!hasSalt) flags.push("Salt not detected (check Na/Cl source).");
-  if (!hasPremix) flags.push("Premix not detected (vit/min premix may be missing).");
-
-  const ctxBlock = contextBlock(ctx);
-  const top = formula.slice(0, 20).map(it => `- ${it.name}: ${it.pct}%`).join("\n");
-
-  return (
-`✅ Formula Review (MVP)
-
-${ctxBlock}
-
-Ingredients: ${formula.length}
-Total: ${total.toFixed(2)}%
-
-Top items:
-${top}
-
-${flags.length ? `⚠️ Flags:\n- ${flags.join("\n- ")}` : "✅ No major MVP flags detected."}
-
-Type MENU to start again.
-
-${VERSION}`
   );
 }
 
@@ -449,8 +656,8 @@ app.post(["/", "/whatsapp"], async (req, res) => {
 
   const twiml = new twilio.twiml.MessagingResponse();
 
-  // Global: MENU/START/HI resets
-  if (!msgLower || ["hi","hello","menu","start"].includes(msgLower)) {
+  // Global reset shortcuts
+  if (!msgLower || ["hi", "hello", "menu", "start"].includes(msgLower)) {
     await resetSession(from);
     twiml.message(MAIN_MENU);
     return res.type("text/xml").send(twiml.toString());
@@ -458,6 +665,7 @@ app.post(["/", "/whatsapp"], async (req, res) => {
 
   let s = await getSession(from);
 
+  // MAIN
   if (s.state === "MAIN") {
     if (d === "1") {
       s.state = "CORE1";
@@ -469,11 +677,16 @@ app.post(["/", "/whatsapp"], async (req, res) => {
     return res.type("text/xml").send(twiml.toString());
   }
 
+  // CORE1
   if (s.state === "CORE1") {
     if (d === "1") {
       s.state = "ANIMAL";
       s.ctx = {};
       s.formula = [];
+      s.estimateMode = null;
+      s.majorQueue = [];
+      s.majorIdx = 0;
+      s.lab = { overrides: {} };
       await saveSession(from, s);
       twiml.message(ANIMAL_MENU);
     } else {
@@ -482,6 +695,7 @@ app.post(["/", "/whatsapp"], async (req, res) => {
     return res.type("text/xml").send(twiml.toString());
   }
 
+  // ANIMAL
   if (s.state === "ANIMAL") {
     const map = {
       "1":"Poultry",
@@ -512,13 +726,9 @@ app.post(["/", "/whatsapp"], async (req, res) => {
     return res.type("text/xml").send(twiml.toString());
   }
 
+  // POULTRY CATEGORY
   if (s.state === "POULTRY_CAT") {
-    const map = {
-      "1":"Broiler",
-      "2":"Layer",
-      "3":"Broiler Breeder",
-      "4":"Layer Breeder"
-    };
+    const map = { "1":"Broiler", "2":"Layer", "3":"Broiler Breeder", "4":"Layer Breeder" };
     const cat = map[d];
     if (!cat) {
       twiml.message(`${POULTRY_CATEGORY_MENU}\n\n${VERSION}`);
@@ -528,14 +738,16 @@ app.post(["/", "/whatsapp"], async (req, res) => {
 
     s.state = "POULTRY_GENETIC";
     await saveSession(from, s);
+
     if (cat === "Layer" || cat === "Layer Breeder") twiml.message(GENETIC_LAYER_MENU);
     else twiml.message(GENETIC_BROILER_MENU);
+
     return res.type("text/xml").send(twiml.toString());
   }
 
+  // POULTRY GENETIC
   if (s.state === "POULTRY_GENETIC") {
     const isLayerGroup = (s.ctx.poultryCategory === "Layer" || s.ctx.poultryCategory === "Layer Breeder");
-
     const mapBroiler = {"1":"Ross","2":"Cobb","3":"Hubbard","4":"Arbor Acres","5":"Other"};
     const mapLayer = {"1":"Hy-Line","2":"Lohmann","3":"ISA","4":"Bovans","5":"Other"};
 
@@ -551,9 +763,11 @@ app.post(["/", "/whatsapp"], async (req, res) => {
 
     if (s.ctx.poultryCategory === "Broiler") twiml.message(BROILER_STAGE_MENU);
     else twiml.message(EGG_LAYER_STAGE_MENU);
+
     return res.type("text/xml").send(twiml.toString());
   }
 
+  // POULTRY STAGE
   if (s.state === "POULTRY_STAGE") {
     let stage = null;
     if (s.ctx.poultryCategory === "Broiler") stage = stageLabelBroiler(d);
@@ -572,6 +786,7 @@ app.post(["/", "/whatsapp"], async (req, res) => {
     return res.type("text/xml").send(twiml.toString());
   }
 
+  // NON-POULTRY STAGE
   if (s.state === "NONPOULTRY_STAGE") {
     const animal = s.ctx.animal;
     const menu = nonPoultryStageMenu(animal);
@@ -589,6 +804,7 @@ app.post(["/", "/whatsapp"], async (req, res) => {
     return res.type("text/xml").send(twiml.toString());
   }
 
+  // FEED FORM
   if (s.state === "FEED_FORM") {
     const ff = feedFormLabel(d);
     if (!ff) {
@@ -603,6 +819,7 @@ app.post(["/", "/whatsapp"], async (req, res) => {
     return res.type("text/xml").send(twiml.toString());
   }
 
+  // INPUT METHOD
   if (s.state === "INPUT_METHOD") {
     if (d === "1") {
       s.state = "MANUAL_ENTRY";
@@ -622,6 +839,7 @@ app.post(["/", "/whatsapp"], async (req, res) => {
     return res.type("text/xml").send(twiml.toString());
   }
 
+  // MANUAL ENTRY
   if (s.state === "MANUAL_ENTRY") {
     const up = msgUpper;
 
@@ -647,9 +865,15 @@ app.post(["/", "/whatsapp"], async (req, res) => {
         twiml.message(`Please add at least 2 ingredients first.\n\n${manualEntryHelp(s.ctx)}`);
         return res.type("text/xml").send(twiml.toString());
       }
-      const report = buildMvpReport(s.ctx, s.formula);
-      await resetSession(from);
-      twiml.message(report);
+
+      // NEW: go to estimate mode choice
+      s.state = "EST_MODE";
+      s.estimateMode = null;
+      s.majorQueue = [];
+      s.majorIdx = 0;
+      s.lab = { overrides: {} };
+      await saveSession(from, s);
+      twiml.message(buildEstimateModeMenu());
       return res.type("text/xml").send(twiml.toString());
     }
 
@@ -673,6 +897,7 @@ app.post(["/", "/whatsapp"], async (req, res) => {
     return res.type("text/xml").send(twiml.toString());
   }
 
+  // BULK PASTE
   if (s.state === "BULK_PASTE") {
     const up = msgUpper;
 
@@ -698,9 +923,15 @@ app.post(["/", "/whatsapp"], async (req, res) => {
         twiml.message(`Please paste at least 2 ingredients first.\n\n${bulkPasteHelp(s.ctx)}`);
         return res.type("text/xml").send(twiml.toString());
       }
-      const report = buildMvpReport(s.ctx, s.formula);
-      await resetSession(from);
-      twiml.message(report);
+
+      // NEW: go to estimate mode choice
+      s.state = "EST_MODE";
+      s.estimateMode = null;
+      s.majorQueue = [];
+      s.majorIdx = 0;
+      s.lab = { overrides: {} };
+      await saveSession(from, s);
+      twiml.message(buildEstimateModeMenu());
       return res.type("text/xml").send(twiml.toString());
     }
 
@@ -719,17 +950,141 @@ app.post(["/", "/whatsapp"], async (req, res) => {
     await saveSession(from, s);
 
     const total = sumPct(s.formula);
-
     twiml.message(
       `✅ Bulk paste processed.\n` +
       `Added: ${added} | Unreadable: ${bad}\n` +
       `Items: ${s.formula.length} | Total: ${total.toFixed(2)}%\n\n` +
-      `You can paste more, or type DONE.\n` +
+      `Paste more, or type DONE.\n` +
       `Commands: LIST / REMOVE <name> / DONE / MENU\n\n${VERSION}`
     );
     return res.type("text/xml").send(twiml.toString());
   }
 
+  // ESTIMATE MODE (after DONE)
+  if (s.state === "EST_MODE") {
+    if (d === "1") {
+      // Quick defaults -> report now
+      const report = buildMvpReport(s.ctx, s.formula, {}, "Quick defaults");
+      await resetSession(from);
+      twiml.message(report);
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    if (d === "2") {
+      s.estimateMode = "lab";
+
+      // Detect major ingredients ≥10%
+      const majors = s.formula
+        .map(it => ({ name: it.name, pct: safeNum(it.pct) }))
+        .filter(it => Number.isFinite(it.pct) && it.pct >= 10)
+        .map(it => ({ name: it.name, pct: Number(it.pct.toFixed(3)) }));
+
+      s.majorQueue = majors;
+      s.majorIdx = 0;
+      s.lab = { overrides: {} };
+
+      s.state = "LAB_MAJOR_LIST";
+      await saveSession(from, s);
+      twiml.message(buildMajorListMessage(majors));
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    twiml.message(buildEstimateModeMenu());
+    return res.type("text/xml").send(twiml.toString());
+  }
+
+  // Confirmation before asking lab values
+  if (s.state === "LAB_MAJOR_LIST") {
+    const up = msgUpper;
+
+    if (up === "SKIP") {
+      // use defaults
+      const report = buildMvpReport(s.ctx, s.formula, {}, "Defaults (lab skipped)");
+      await resetSession(from);
+      twiml.message(report);
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    if (up === "OK" || up === "YES") {
+      if (!s.majorQueue.length) {
+        const report = buildMvpReport(s.ctx, s.formula, {}, "Defaults (no majors)");
+        await resetSession(from);
+        twiml.message(report);
+        return res.type("text/xml").send(twiml.toString());
+      }
+
+      s.state = "LAB_ASK";
+      s.majorIdx = 0;
+      await saveSession(from, s);
+
+      const item = s.majorQueue[s.majorIdx];
+      twiml.message(buildAskMajorPrompt(s.ctx, item));
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    twiml.message(buildMajorListMessage(s.majorQueue));
+    return res.type("text/xml").send(twiml.toString());
+  }
+
+  // LAB_ASK: ask DM,CP per major ingredient
+  if (s.state === "LAB_ASK") {
+    const up = msgUpper;
+
+    // allow LIST anytime
+    if (up === "LIST") {
+      twiml.message(`${listFormula(s.formula)}\n\n${VERSION}`);
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    const current = s.majorQueue[s.majorIdx];
+    if (!current) {
+      // safety
+      const report = buildMvpReport(s.ctx, s.formula, s.lab.overrides, "Lab-assisted");
+      await resetSession(from);
+      twiml.message(report);
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    const parsed = parseLabReply(raw);
+
+    const key = normLower(current.name);
+    const def = getDefaultDMCP(current.name);
+
+    if (parsed.skip) {
+      // do nothing (defaults will be used)
+    } else if (parsed.ok) {
+      const dm = parsed.dm;
+      // If CP not provided, use CP tag from name or default
+      let cpDm = parsed.cp;
+      if (cpDm === null) {
+        const tag = extractCPTagFromName(current.name);
+        cpDm = tag !== null ? tag : def.cpDm;
+      }
+      s.lab.overrides[key] = { dm, cpDm };
+    } else {
+      twiml.message(`I couldn’t read that. Send DM, CP like: 88, 8.5  (or SKIP)\n\n${buildAskMajorPrompt(s.ctx, current)}`);
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    // Next ingredient
+    s.majorIdx += 1;
+
+    if (s.majorIdx >= s.majorQueue.length) {
+      // Finish -> report
+      const report = buildMvpReport(s.ctx, s.formula, s.lab.overrides, "Lab-assisted (majors)");
+      await resetSession(from);
+      twiml.message(report);
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    await saveSession(from, s);
+
+    const nextItem = s.majorQueue[s.majorIdx];
+    twiml.message(buildAskMajorPrompt(s.ctx, nextItem));
+    return res.type("text/xml").send(twiml.toString());
+  }
+
+  // Fallback
   await resetSession(from);
   twiml.message(`${MAIN_MENU}\n\n${VERSION}`);
   return res.type("text/xml").send(twiml.toString());
