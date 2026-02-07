@@ -7,7 +7,7 @@ const Redis = require("ioredis");
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 
-const VERSION = "NutriPilot AI vFinal+BulkPaste ✅ (All animals + Poultry split + Separate genetic lines + Full egg-layer stages + Redis sessions + Bulk Paste)";
+const VERSION = "NutriPilot AI vFinal+BulkPaste v2 ✅ (Fix CP tags + o.122/.122 parsing)";
 
 // -------------------- Redis (prevents sleep/mix) --------------------
 const REDIS_URL = process.env.REDIS_URL || "";
@@ -53,8 +53,8 @@ async function resetSession(from) {
 function makeFreshSession() {
   return {
     state: "MAIN",
-    ctx: {},      // animal/poultry/genetics/stage/feedform
-    formula: [],  // [{name, pct}]
+    ctx: {},
+    formula: [],
   };
 }
 
@@ -67,10 +67,16 @@ function firstDigit(x) {
   return m ? m[1] : null;
 }
 
+// Convert common numeric typos: o.122 -> 0.122 , .122 -> 0.122
+function normalizeNumericTypos(text) {
+  return String(text || "")
+    .replace(/o\./gi, "0.")
+    .replace(/(^|[^\d])\.(\d+)/g, "$10.$2"); // ".122" or " x.122" -> "0.122"
+}
+
 function safeNum(x) {
-  const s = String(x || "")
-    .replace(/o\./gi, "0.")         // common typo: o.122 -> 0.122
-    .replace(/[^\d.\-]/g, "");      // strip non-numeric (keeps dot and minus)
+  const s = normalizeNumericTypos(x)
+    .replace(/[^\d.\-]/g, ""); // keep digits dot minus
   const n = Number(s);
   return Number.isFinite(n) ? n : null;
 }
@@ -95,45 +101,63 @@ function removeByName(items, name) {
 
 // Strict line: "ADD Maize 27.45" OR "Maize 27.45"
 function parseAddLine(text) {
-  const raw = String(text || "").trim();
-  if (!raw) return null;
+  const raw0 = String(text || "").trim();
+  if (!raw0) return null;
 
+  const raw = normalizeNumericTypos(raw0).replace(/[,;]+$/g, "").trim(); // allow trailing commas
   const withoutAdd = raw.replace(/^ADD\s+/i, "");
-  const m = withoutAdd.match(/^(.*?)(-?\d+(?:\.\d+)?)\s*%?\s*$/);
+
+  // last number at end = inclusion (supports 0.122 and .122)
+  const m = withoutAdd.match(/^(.*?)(-?(?:\d*\.\d+|\d+))\s*%?\s*$/);
   if (!m) return null;
 
-  const name = m[1].trim().replace(/[,;]+$/g, "").trim();
+  const name = m[1].trim().replace(/[:\-]+$/g, "").trim();
   const pct = safeNum(m[2]);
 
   if (!name || pct === null) return null;
   return { name, pct };
 }
 
-// Flexible token for bulk paste: accepts "Maize27.45," "SBM44% 25.34" "Millet/Bajra 4,"
+// Flexible bulk token: keeps CP% inside name, uses last number at end as inclusion
 function parseTokenFlexible(token) {
-  const t = String(token || "").trim().replace(/^[\-\u2022•\*]+\s*/g, ""); // remove bullet starts
-  if (!t) return null;
+  const t0 = String(token || "").trim();
+  if (!t0) return null;
 
-  // remove trailing punctuation
-  const cleaned = t.replace(/[,;]+$/g, "").trim();
+  const t1 = normalizeNumericTypos(t0)
+    .replace(/^[\-\u2022•\*]+\s*/g, "") // bullets
+    .replace(/[,;]+$/g, "")            // trailing punctuation
+    .trim();
 
-  // try to capture last number at end (space or no-space)
-  const m = cleaned.match(/^(.*?)(-?\d+(?:\.\d+)?)\s*%?\s*$/);
+  // last number at end = inclusion
+  const m = t1.match(/^(.*?)(-?(?:\d*\.\d+|\d+))\s*%?\s*$/);
   if (!m) return null;
 
   const name = m[1].trim().replace(/[:\-]+$/g, "").trim();
   const pct = safeNum(m[2]);
+
   if (!name || pct === null) return null;
+
+  // sanity: if someone still sends >100 due to weird paste, reject it
+  // (inclusion % should never exceed 100)
+  if (pct > 100) return null;
 
   return { name, pct };
 }
 
 function splitBulkText(text) {
-  // split by newline, semicolon, comma
-  return String(text || "")
-    .split(/[\n;\r]+|,(?!\d)/g) // comma split but avoids some numeric formats; still OK for our use
+  // split by newline or semicolon first, then commas
+  const base = String(text || "")
+    .split(/[\n;\r]+/g)
     .map(s => s.trim())
     .filter(Boolean);
+
+  const out = [];
+  for (const line of base) {
+    // split commas within a line
+    const parts = line.split(",").map(x => x.trim()).filter(Boolean);
+    out.push(...parts);
+  }
+  return out;
 }
 
 // -------------------- Menus --------------------
@@ -320,7 +344,7 @@ function feedFormLabel(n) {
   return map[n] || null;
 }
 
-// -------------------- Manual/Bulk Help --------------------
+// -------------------- Help blocks --------------------
 function contextBlock(ctx) {
   return [
     `Animal: ${ctx.animal || "-"}`,
@@ -343,7 +367,8 @@ ADD <ingredient name> <percent>
 Examples:
 ADD Maize 27.45
 ADD SBM44% 25.34
-ADD Salt 0.30
+ADD Sunflower meal26-28% 5
+ADD DLM99% 0.122
 
 Commands:
 LIST
@@ -362,9 +387,9 @@ ${contextBlock(ctx)}
 Paste your formula in any format (comma/newline/semicolon).
 
 Examples:
-Maize27.45, SBM44% 25.34
-Rice broken 15
-Fishmeal54%12.26
+SBM44% 25.34
+Sunflower meal26-28% 5
+DLM99% o.122
 Salt 0.30
 
 Commands:
@@ -375,7 +400,7 @@ MENU`
   );
 }
 
-// -------------------- Final “Review” (MVP) --------------------
+// -------------------- MVP Report --------------------
 function buildMvpReport(ctx, formula) {
   const total = sumPct(formula);
   const names = formula.map(x => normLower(x.name));
@@ -388,7 +413,6 @@ function buildMvpReport(ctx, formula) {
   if (!hasPremix) flags.push("Premix not detected (vit/min premix may be missing).");
 
   const ctxBlock = contextBlock(ctx);
-
   const top = formula.slice(0, 20).map(it => `- ${it.name}: ${it.pct}%`).join("\n");
 
   return (
@@ -415,7 +439,7 @@ app.get(["/", "/whatsapp"], (req, res) => {
   res.status(200).send(VERSION);
 });
 
-// -------------------- Webhook (accept both) --------------------
+// -------------------- Webhook --------------------
 app.post(["/", "/whatsapp"], async (req, res) => {
   const from = req.body.From || "unknown";
   const raw = req.body.Body || "";
@@ -434,7 +458,6 @@ app.post(["/", "/whatsapp"], async (req, res) => {
 
   let s = await getSession(from);
 
-  // MAIN
   if (s.state === "MAIN") {
     if (d === "1") {
       s.state = "CORE1";
@@ -446,7 +469,6 @@ app.post(["/", "/whatsapp"], async (req, res) => {
     return res.type("text/xml").send(twiml.toString());
   }
 
-  // CORE1
   if (s.state === "CORE1") {
     if (d === "1") {
       s.state = "ANIMAL";
@@ -460,7 +482,6 @@ app.post(["/", "/whatsapp"], async (req, res) => {
     return res.type("text/xml").send(twiml.toString());
   }
 
-  // ANIMAL
   if (s.state === "ANIMAL") {
     const map = {
       "1":"Poultry",
@@ -491,7 +512,6 @@ app.post(["/", "/whatsapp"], async (req, res) => {
     return res.type("text/xml").send(twiml.toString());
   }
 
-  // POULTRY CATEGORY
   if (s.state === "POULTRY_CAT") {
     const map = {
       "1":"Broiler",
@@ -513,7 +533,6 @@ app.post(["/", "/whatsapp"], async (req, res) => {
     return res.type("text/xml").send(twiml.toString());
   }
 
-  // POULTRY GENETIC
   if (s.state === "POULTRY_GENETIC") {
     const isLayerGroup = (s.ctx.poultryCategory === "Layer" || s.ctx.poultryCategory === "Layer Breeder");
 
@@ -535,7 +554,6 @@ app.post(["/", "/whatsapp"], async (req, res) => {
     return res.type("text/xml").send(twiml.toString());
   }
 
-  // POULTRY STAGE
   if (s.state === "POULTRY_STAGE") {
     let stage = null;
     if (s.ctx.poultryCategory === "Broiler") stage = stageLabelBroiler(d);
@@ -554,7 +572,6 @@ app.post(["/", "/whatsapp"], async (req, res) => {
     return res.type("text/xml").send(twiml.toString());
   }
 
-  // NON-POULTRY STAGE
   if (s.state === "NONPOULTRY_STAGE") {
     const animal = s.ctx.animal;
     const menu = nonPoultryStageMenu(animal);
@@ -572,7 +589,6 @@ app.post(["/", "/whatsapp"], async (req, res) => {
     return res.type("text/xml").send(twiml.toString());
   }
 
-  // FEED FORM
   if (s.state === "FEED_FORM") {
     const ff = feedFormLabel(d);
     if (!ff) {
@@ -587,7 +603,6 @@ app.post(["/", "/whatsapp"], async (req, res) => {
     return res.type("text/xml").send(twiml.toString());
   }
 
-  // INPUT METHOD
   if (s.state === "INPUT_METHOD") {
     if (d === "1") {
       s.state = "MANUAL_ENTRY";
@@ -607,7 +622,6 @@ app.post(["/", "/whatsapp"], async (req, res) => {
     return res.type("text/xml").send(twiml.toString());
   }
 
-  // MANUAL ENTRY
   if (s.state === "MANUAL_ENTRY") {
     const up = msgUpper;
 
@@ -646,7 +660,7 @@ app.post(["/", "/whatsapp"], async (req, res) => {
     }
 
     s.formula.push(item);
-    if (s.formula.length > 200) s.formula = s.formula.slice(0, 200);
+    if (s.formula.length > 250) s.formula = s.formula.slice(0, 250);
     await saveSession(from, s);
 
     const total = sumPct(s.formula);
@@ -659,7 +673,6 @@ app.post(["/", "/whatsapp"], async (req, res) => {
     return res.type("text/xml").send(twiml.toString());
   }
 
-  // BULK PASTE
   if (s.state === "BULK_PASTE") {
     const up = msgUpper;
 
@@ -691,7 +704,6 @@ app.post(["/", "/whatsapp"], async (req, res) => {
       return res.type("text/xml").send(twiml.toString());
     }
 
-    // parse bulk paste content
     const parts = splitBulkText(raw);
     let added = 0;
     let bad = 0;
@@ -701,10 +713,7 @@ app.post(["/", "/whatsapp"], async (req, res) => {
       if (!item) { bad++; continue; }
       s.formula.push(item);
       added++;
-      if (s.formula.length > 200) {
-        s.formula = s.formula.slice(0, 200);
-        break;
-      }
+      if (s.formula.length > 250) break;
     }
 
     await saveSession(from, s);
@@ -721,7 +730,6 @@ app.post(["/", "/whatsapp"], async (req, res) => {
     return res.type("text/xml").send(twiml.toString());
   }
 
-  // Fallback
   await resetSession(from);
   twiml.message(`${MAIN_MENU}\n\n${VERSION}`);
   return res.type("text/xml").send(twiml.toString());
