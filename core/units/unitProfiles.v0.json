@@ -1,0 +1,50 @@
+{
+  "US": {
+    "energy": { "me": "kcal/kg" },
+    "aa": { "default": "%" },
+    "major_minerals": { "default": "%" },
+    "trace_minerals": { "default": "ppm" }
+  },
+  "EU": {
+    "energy": { "me": "MJ/kg" },
+    "aa": { "default": "%" },
+    "major_minerals": { "default": "%" },
+    "trace_minerals": { "default": "ppm" }
+  },
+  "AU_NZ": {
+    "energy": { "me": "MJ/kg" },
+    "aa": { "default": "%" },
+    "major_minerals": { "default": "%" },
+    "trace_minerals": { "default": "ppm" }
+  },
+  "SOUTH_ASIA": {
+    "energy": { "me": "kcal/kg" },
+    "aa": { "default": "%" },
+    "major_minerals": { "default": "%" },
+    "trace_minerals": { "default": "ppm" }
+  },
+  "LATAM": {
+    "energy": { "me": "kcal/kg" },
+    "aa": { "default": "%" },
+    "major_minerals": { "default": "%" },
+    "trace_minerals": { "default": "ppm" }
+  },
+  "EAST_ASIA": {
+    "energy": { "me": "MJ/kg" },
+    "aa": { "default": "%" },
+    "major_minerals": { "default": "%" },
+    "trace_minerals": { "default": "ppm" }
+  },
+  "GULF": {
+    "energy": { "me": "MJ/kg" },
+    "aa": { "default": "%" },
+    "major_minerals": { "default": "%" },
+    "trace_minerals": { "default": "ppm" }
+  },
+  "AFRICA": {
+    "energy": { "me": "kcal/kg" },
+    "aa": { "default": "%" },
+    "major_minerals": { "default": "%" },
+    "trace_minerals": { "default": "ppm" }
+  }
+}

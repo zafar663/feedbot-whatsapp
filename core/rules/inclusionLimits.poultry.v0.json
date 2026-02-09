@@ -1,0 +1,8 @@
+{
+  "poultry_broiler_starter": {
+    "corn":   { "min": 0,   "max": 100, "rec_min": 45, "rec_max": 70 },
+    "sbm":    { "min": 0,   "max": 45,  "rec_min": 20, "rec_max": 35 },
+    "oil":    { "min": 0,   "max": 6,   "rec_min": 1,  "rec_max": 4 },
+    "salt":   { "min": 0,   "max": 0.5, "rec_min": 0.2,"rec_max": 0.35 }
+  }
+}

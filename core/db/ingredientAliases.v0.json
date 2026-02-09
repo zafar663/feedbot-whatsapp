@@ -1,0 +1,38 @@
+{
+  "corn": [
+    "corn",
+    "maize",
+    "yellow corn",
+    "ground corn",
+    "corn grain",
+    "maize grain"
+  ],
+  "sbm": [
+    "sbm",
+    "soybean meal",
+    "soya meal",
+    "soy meal",
+    "soybean meal 46",
+    "soybean meal 48",
+    "sbm 46",
+    "sbm 48",
+    "soybean meal-46",
+    "soybean meal-48"
+  ],
+  "oil": [
+    "oil",
+    "soy oil",
+    "soya oil",
+    "vegetable oil",
+    "veg oil",
+    "poultry fat",
+    "tallow"
+  ],
+  "salt": [
+    "salt",
+    "common salt",
+    "nacl",
+    "na cl",
+    "sodium chloride"
+  ]
+}
