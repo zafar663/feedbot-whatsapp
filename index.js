@@ -1,10 +1,14 @@
+// feedbot-whatsapp/index.js
+
 const express = require("express");
 const axios = require("axios");
 const FormData = require("form-data");
 const twilio = require("twilio");
 const { MessagingResponse } = twilio.twiml;
 
-try { require("dotenv").config(); } catch (e) {}
+try {
+  require("dotenv").config();
+} catch (e) {}
 
 const PORT = process.env.PORT || 3000;
 const AGROCORE_BASE = (process.env.AGROCORE_BASE || "https://agrocore-api.onrender.com").trim();
@@ -14,17 +18,50 @@ const TWILIO_AUTH_TOKEN = (process.env.TWILIO_AUTH_TOKEN || "").trim();
 const VERSION = "NutriPilot vSafeReply ✅ (PDF/Image → Ingest → Analyze) v0.7";
 
 const app = express();
-app.use(express.urlencoded({ extended: false }));
-app.use(express.json());
+app.use(express.urlencoded({ extended: false })); // Twilio webhook is x-www-form-urlencoded
+app.use(express.json()); // for your own tests
 
-
+// --------------------
+// Health / status
+// --------------------
 app.get("/", (req, res) => {
   res.status(200).send(
-    `Feedbot is running ?
+    `Feedbot is running ✅
 Version: ${VERSION}
 AgroCore base: ${AGROCORE_BASE}`
   );
 });
+
+// Debug endpoint: confirms whether Feedbot (on Render) can reach AgroCore
+app.get("/debug/agrocore", async (req, res) => {
+  try {
+    const r = await axios.post(
+      `${AGROCORE_BASE}/v1/analyze`,
+      { locale: "US", formula_text: "Corn 55\nSBM 30\nOil 3\nSalt 0.3" },
+      { timeout: 20000, validateStatus: () => true }
+    );
+
+    return res.status(200).json({
+      ok: true,
+      version: VERSION,
+      agrocore_base: AGROCORE_BASE,
+      agrocore_status: r.status,
+      agrocore_data: r.data,
+    });
+  } catch (e) {
+    return res.status(200).json({
+      ok: false,
+      version: VERSION,
+      agrocore_base: AGROCORE_BASE,
+      error: String(e?.message || e),
+      code: e?.code,
+    });
+  }
+});
+
+// --------------------
+// Helpers
+// --------------------
 function safeReply(res, msg) {
   const twiml = new MessagingResponse();
   twiml.message(msg);
@@ -36,6 +73,7 @@ async function downloadTwilioMedia(mediaUrl) {
   if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
     throw new Error("Missing TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN (needed to download MediaUrl0).");
   }
+
   const r = await axios.get(mediaUrl, {
     responseType: "arraybuffer",
     auth: { username: TWILIO_ACCOUNT_SID, password: TWILIO_AUTH_TOKEN },
@@ -43,15 +81,18 @@ async function downloadTwilioMedia(mediaUrl) {
     maxRedirects: 5,
     validateStatus: () => true,
   });
+
   if (r.status >= 400) {
     const txt = Buffer.from(r.data || []).toString("utf8");
     throw new Error(`Twilio download failed HTTP ${r.status}: ${txt.slice(0, 400)}`);
   }
+
   return Buffer.from(r.data);
 }
 
 async function agrocoreIngest(fileBuf, mediaType0, filename) {
   const url = `${AGROCORE_BASE}/v1/ingest`;
+
   const form = new FormData();
   form.append("file", fileBuf, {
     filename: filename || "upload.bin",
@@ -69,27 +110,39 @@ async function agrocoreIngest(fileBuf, mediaType0, filename) {
   if (r.status >= 400) {
     throw new Error(`AgroCore ingest failed HTTP ${r.status}: ${JSON.stringify(r.data).slice(0, 800)}`);
   }
+
   return r.data; // expected { ok, text, ingest: {...} }
 }
 
 async function agrocoreAnalyze(formulaText) {
   const url = `${AGROCORE_BASE}/v1/analyze`;
-  const r = await axios.post(url, { locale: "US", formula_text: formulaText }, { timeout: 60000, validateStatus: () => true });
+
+  const r = await axios.post(
+    url,
+    { locale: "US", formula_text: formulaText },
+    { timeout: 60000, validateStatus: () => true }
+  );
+
   if (r.status >= 400) {
     throw new Error(`AgroCore analyze failed HTTP ${r.status}: ${JSON.stringify(r.data).slice(0, 800)}`);
   }
+
   return r.data;
 }
 
 function guessFilename(bodyRaw, mediaType0) {
   const name = (bodyRaw || "").trim();
   if (name && name.length < 120 && name.includes(".")) return name;
+
   const mt = String(mediaType0 || "").toLowerCase();
   if (mt.includes("pdf")) return "upload.pdf";
   if (mt.startsWith("image/")) return "upload.jpg";
   return "upload.bin";
 }
 
+// --------------------
+// WhatsApp webhook
+// --------------------
 app.post("/whatsapp", async (req, res) => {
   try {
     const bodyRaw = req.body?.Body ?? "";
@@ -108,8 +161,21 @@ app.post("/whatsapp", async (req, res) => {
     if (!numMedia) {
       const text = (bodyRaw || "").trim();
       if (!text) return safeReply(res, `${VERSION}\nSend formula text OR attach a PDF/image.`);
+
       const a = await agrocoreAnalyze(text);
-      return safeReply(res, `${VERSION}\n✅ Text analyzed.\nME: ${a?.nutrient_profile_canonical?.me ? Math.round(a.nutrient_profile_canonical.me) + " kcal/kg" : "n/a"}\nCP: ${a?.nutrient_profile_canonical?.cp ? a.nutrient_profile_canonical.cp.toFixed(2) + "%" : "n/a"}`);
+
+      return safeReply(
+        res,
+        `${VERSION}\n✅ Text analyzed.\nME: ${
+          a?.nutrient_profile_canonical?.me
+            ? Math.round(a.nutrient_profile_canonical.me) + " kcal/kg"
+            : "n/a"
+        }\nCP: ${
+          a?.nutrient_profile_canonical?.cp
+            ? a.nutrient_profile_canonical.cp.toFixed(2) + "%"
+            : "n/a"
+        }`
+      );
     }
 
     // MEDIA
@@ -133,7 +199,18 @@ app.post("/whatsapp", async (req, res) => {
     const a = await agrocoreAnalyze(extracted);
 
     // 4) Reply
-    return safeReply(res, `${VERSION}\n✅ File ingested + analyzed.\nME: ${a?.nutrient_profile_canonical?.me ? Math.round(a.nutrient_profile_canonical.me) + " kcal/kg" : "n/a"}\nCP: ${a?.nutrient_profile_canonical?.cp ? a.nutrient_profile_canonical.cp.toFixed(2) + "%" : "n/a"}`);
+    return safeReply(
+      res,
+      `${VERSION}\n✅ File ingested + analyzed.\nME: ${
+        a?.nutrient_profile_canonical?.me
+          ? Math.round(a.nutrient_profile_canonical.me) + " kcal/kg"
+          : "n/a"
+      }\nCP: ${
+        a?.nutrient_profile_canonical?.cp
+          ? a.nutrient_profile_canonical.cp.toFixed(2) + "%"
+          : "n/a"
+      }`
+    );
   } catch (err) {
     console.error("=== ERROR ===");
     console.error(err?.message || err);
@@ -141,15 +218,16 @@ app.post("/whatsapp", async (req, res) => {
       console.error("HTTP", err.response.status, err.response.data);
     }
     console.error("=============");
+
     return safeReply(res, `${VERSION}\n⚠️ Failed: ${err?.message || "Unknown failure"}`);
   }
 });
 
+// --------------------
+// Start
+// --------------------
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`${VERSION}`);
   console.log(`NutriPilot running on port ${PORT}`);
   console.log(`AgroCore base: ${AGROCORE_BASE}`);
 });
-
-
-
