@@ -137,3 +137,16 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# local artifacts
+formula.xls
+*.xls
+*.xlsx
+
+# local copies of other services / monorepo folders (do not deploy from here)
+agrocore/
+core/
+
+# lockfiles (optional: keep ONLY ONE strategy)
+# package-lock.json
+
