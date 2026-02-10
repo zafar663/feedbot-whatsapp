@@ -204,6 +204,16 @@ app.post("/whatsapp", async (req, res) => {
   }
 });
 
+// IMPORTANT: catch-all (prevents Render HTML confusion & makes debugging clearer)
+app.use((req, res) => {
+  return res.status(404).json({
+    ok: false,
+    error: "Not Found",
+    path: req.path,
+    hint: "Use POST /whatsapp or GET /debug/agrocore",
+  });
+});
+
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`${VERSION}`);
   console.log(`NutriPilot running on port ${PORT}`);
