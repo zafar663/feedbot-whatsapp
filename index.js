@@ -31,34 +31,7 @@ AGROCORE_BASE=${AGROCORE_BASE}`
   );
 });
 
-// DEBUG: verify analyze works from this service (Render → AgroCore)
-app.get("/debug/analyze", async (req, res) => {
-  try {
-    const url = `${AGROCORE_BASE}/v1/analyze`;
-    const payload = { locale: "US", formula_text: "Corn 55\nSBM 30\nOil 3\nSalt 0.3" };
-
-    const r = await axios.post(url, payload, { timeout: 20000, validateStatus: () => true });
-
-    return res.status(200).json({
-      ok: true,
-      AGROCORE_BASE,
-      url,
-      status: r.status,
-      headers: r.headers,
-      data: r.data
-    });
-  } catch (err) {
-    return res.status(200).json({
-      ok: false,
-      AGROCORE_BASE,
-      error: String(err?.message || err),
-      responseStatus: err?.response?.status,
-      responseData: err?.response?.data
-    });
-  }
-});
-
-// DEBUG: verify this service can reach AgroCore health (Render → AgroCore)
+// DEBUG: verify this service can reach AgroCore from Render
 app.get("/debug/agrocore", async (req, res) => {
   try {
     const healthUrl = `${AGROCORE_BASE}/v1/health`;
@@ -76,6 +49,33 @@ app.get("/debug/agrocore", async (req, res) => {
       ok: false,
       AGROCORE_BASE,
       error: String(err?.message || err)
+    });
+  }
+});
+
+// DEBUG: run a real analyze from Render (proves outbound POST works)
+app.get("/debug/analyze", async (req, res) => {
+  try {
+    const url = `${AGROCORE_BASE}/v1/analyze`;
+    const payload = { locale: "US", formula_text: "Corn 55\nSBM 30\nOil 3\nSalt 0.3" };
+
+    const r = await axios.post(url, payload, { timeout: 20000, validateStatus: () => true });
+
+    return res.status(200).json({
+      ok: true,
+      AGROCORE_BASE,
+      url,
+      status: r.status,
+      contentType: r.headers?.["content-type"] || null,
+      data: r.data
+    });
+  } catch (err) {
+    return res.status(200).json({
+      ok: false,
+      AGROCORE_BASE,
+      error: String(err?.message || err),
+      responseStatus: err?.response?.status,
+      responseData: err?.response?.data
     });
   }
 });
@@ -129,8 +129,7 @@ async function agrocoreIngest(fileBuf, mediaType0, filename) {
     throw new Error(`AgroCore ingest failed HTTP ${r.status}: ${JSON.stringify(r.data).slice(0, 800)}`);
   }
 
-  // expected: { ok:true, formula_text:"...", ingest:{...} }
-  return r.data;
+  return r.data; // expected { ok, formula_text, ingest: {...} }
 }
 
 async function agrocoreAnalyze(formulaText) {
@@ -202,12 +201,24 @@ app.post("/whatsapp", async (req, res) => {
     const filename = guessFilename(bodyRaw, mediaType0);
     const ingest = await agrocoreIngest(fileBuf, mediaType0, filename);
 
-    // ✅ IMPORTANT FIX: AgroCore returns formula_text (not text)
-    const extracted = (ingest?.formula_text || "").trim();
+    // ✅ FIX: read the correct field(s)
+    const extracted = String(
+      ingest?.formula_text ||
+      ingest?.ingest?.formula_text ||
+      ingest?.text || ""
+    ).trim();
+
+    console.log(`[WA] Ingest ok=${ingest?.ok} keys=${Object.keys(ingest || {}).join(",")}`);
     console.log(`[WA] Extracted chars: ${extracted.length}`);
 
     if (!extracted) {
-      return safeReply(res, `${VERSION}\n⚠️ I got the file but couldn't extract text. Try a clearer file.`);
+      // show ingest status/warnings (super helpful)
+      const status = ingest?.ingest?.status || "unknown";
+      const warns = Array.isArray(ingest?.ingest?.warnings) ? ingest.ingest.warnings.join("; ") : "";
+      return safeReply(
+        res,
+        `${VERSION}\n⚠️ I got the file but couldn't extract text.\nIngest: ${status}${warns ? "\nWarn: " + warns : ""}\nTry a clearer file or an image.`
+      );
     }
 
     // 3) Analyze extracted text
