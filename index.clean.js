@@ -155,13 +155,7 @@ function fmtNum(v, dec, maxDec = 2) {
   if (v === "-" || v == null) return "-";
   const n = Number(v);
   if (!Number.isFinite(n)) return "-";
-  // Use enough decimals to show micro-inclusions like 0.001, 0.006
-  const decimals = Math.min(dec ?? 2, maxDec);
-  const str = n.toFixed(decimals);
-  // Only strip trailing .00 if the value is actually >= 0.01 (not a micro-inclusion)
-  if (n >= 0.01) return str.replace(/\.00$/, "");
-  // For micro-inclusions, use up to 3 decimal places
-  return n.toFixed(Math.max(decimals, 3)).replace(/0+$/, "").replace(/\.$/, "");
+  return n.toFixed(Math.min(dec ?? 2, maxDec)).replace(/\.00$/, "");
 }
 
 function looksLikeGreeting(txt) {
@@ -1048,14 +1042,6 @@ async function runOptimize({ formula_text, ingestMeta, session, lastFail, scenar
   const correctionPool = [
     { id: "limestone", ingredient_name: "Limestone", canonical_id: "limestone", inclusion: 0, min: 0, max: 15 },
     { id: "dcp", ingredient_name: "Dicalcium phosphate", canonical_id: "dcp", inclusion: 0, min: 0, max: 10 },
-    { id: "acid_oil", ingredient_name: "Acid Oil", canonical_id: "acid_oil", inclusion: 0, min: 0, max: 10 },
-    { id: "l_ile", ingredient_name: "L-Isoleucine", canonical_id: "l_ile", inclusion: 0, min: 0, max: 1 },
-    { id: "l_val", ingredient_name: "L-Valine", canonical_id: "l_val", inclusion: 0, min: 0, max: 1 },
-    { id: "l_arg", ingredient_name: "L-Arginine", canonical_id: "l_arg", inclusion: 0, min: 0, max: 1 },
-    { id: "l_lys_sulfate", ingredient_name: "L-Lysine Sulfate", canonical_id: "l_lys_sulfate", inclusion: 0, min: 0, max: 3 },
-    { id: "anti_coccidial", ingredient_name: "Anti-Coccidial", canonical_id: "anti_coccidial", inclusion: 0, min: 0, max: 0.1 },
-    { id: "vit_min_premix", ingredient_name: "Vit+Min Premix", canonical_id: "vit_min_premix", inclusion: 0, min: 0, max: 1 },
-    { id: "meat_bone_meal_45_cp", ingredient_name: "MBM 45%", canonical_id: "meat_bone_meal_45_cp", inclusion: 0, min: 0, max: 15 },
     { id: "dl_met", ingredient_name: "DL-Methionine", canonical_id: "dl_met", inclusion: 0, min: 0, max: 2 },
     { id: "l_lys_hcl", ingredient_name: "L-Lysine HCl", canonical_id: "l_lys_hcl", inclusion: 0, min: 0, max: 2 },
     { id: "l_thr", ingredient_name: "L-Threonine", canonical_id: "l_thr", inclusion: 0, min: 0, max: 2 },
@@ -1830,9 +1816,7 @@ async function generateQuickFixPdfReport({ qf, session }) {
         const m = line.match(/^(.+?)\s+(-?\d+(?:\.\d+)?)$/);
         if (!m) return null;
         const rawName = m[1].trim();
-        const val = Number(m[2]);
-        const formatted = val > 0 && val < 0.01 ? val.toFixed(3) : val.toFixed(2);
-        return [pdfNameMap[rawName] || rawName, formatted];
+        return [pdfNameMap[rawName] || rawName, Number(m[2]).toFixed(2)];
       })
       .filter(Boolean);
   }
@@ -2057,17 +2041,6 @@ async function generateQuickFixPdfReport({ qf, session }) {
     potato_protein: "Potato Protein",
     sugarcane_molasses: "Molasses", brewers_grains: "Brewers Grain",
     hominy_meal: "Hominy Meal", alfalfa_meal: "Alfalfa Meal",
-    acid_oil: "Acid Oil",
-    meat_bone_meal_45_cp: "MBM 45%",
-    meat_bone_meal_48_cp: "MBM 48%",
-    l_arg: "L-Arginine",
-    monosodium_phosphate: "Mono-Na Phos",
-    dicalcium_phosphate: "Di-Ca Phos",
-    beet_pulp: "Beet Pulp",
-    molasses_cane: "Cane Molasses",
-    alfalfa_meal_17_cp: "Alfalfa Meal",
-    wheat_middlings: "Wheat Midds",
-    soybean_hulls: "Soy Hulls",
   };
 
   section("Ingredient Changes", true);

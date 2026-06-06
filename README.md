@@ -1,21 +1,23 @@
-# 🤖 Feedbot-AI
+﻿# ðŸ¤– LiveIQ
 
-Feedbot-AI is an AI-powered WhatsApp chatbot designed to provide feed, nutrition, and farm advisory support through WhatsApp.
+LiveIQ is an AI-powered WhatsApp livestock intelligence assistant covering feed formulation, farm performance, feed mill monitoring, and nutritionist support â€” all via WhatsApp.
 
-The project integrates Twilio WhatsApp, Node.js, and AI APIs to automate responses and deliver real-time support to farmers and feed professionals.
+The platform integrates Twilio WhatsApp, Node.js, and AI to deliver real-time livestock intelligence to farmers, nutritionists, and feed mill operators globally.
 
-## Features
-- WhatsApp chatbot using Twilio
-- AI-driven responses
-- Secure environment variable handling
-- Scalable Node.js backend
-- Cloud deployment ready (Render)
+## What LiveIQ Does
+- Feed formula analysis and optimization
+- FarmPulse â€” flock performance vs breed standards
+- MillIQ â€” feed mill batch and deviation monitoring
+- AI nutritionist assistance (ASK LIVEIQ)
+- Multi-language support (Urdu, Arabic, Hindi, Bahasa and more)
+- 128 breed standards across poultry, dairy, beef, sheep, goat
 
 ## Tech Stack
 - Backend: Node.js, Express
 - Messaging: Twilio WhatsApp API
-- AI: OpenAI (or compatible LLM)
-- Hosting: Render
+- AI: Claude (Anthropic) / OpenAI compatible
+- Platform: Live IQ
+- Hosting: Render / Vultr
 
 ## Getting Started
 1. Clone the repository
