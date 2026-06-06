@@ -915,7 +915,7 @@ async function runAnalyze({ formula_text, resolved_rows = [], ingestMeta, sessio
     type: session?.context?.type || "broiler",
     production: session?.context?.production || "meat",
     breed: session?.context?.breed || "generic",
-    phase: session?.context?.phase || "starter",
+    phase: session?.context?.phase || null,
 
     formula_text: resolvedFormulaText,
     resolved_rows: hasResolvedRows ? resolved_rows : [],
@@ -2930,7 +2930,9 @@ return buildFinalReply({
   const nameMap = {
     corn_grain_avg: "Maize",
     soybean_meal_44_5_cp: "SBM 44%",
+    soybean_meal_46_5_cp: "SBM 46.5%",
     soybean_meal_48_cp: "SBM 48%",
+    soybean_meal_45_5_cp: "SBM 45.5%",
     fish_meal_54_cp: "Fish 54%",
     fish_meal_65_cp: "Fish 65%",
     corn_gluten_meal_60_cp: "CGM 60%",
@@ -2938,23 +2940,51 @@ return buildFinalReply({
     sunflower_meal: "Sunflower",
     rice_broken: "Rice Brkn",
     millet_grain: "Millet",
+    wheat_grain: "Wheat",
+    wheat_bran: "Wheat Bran",
+    wheat_middlings: "Wht Midds",
+    sorghum_grain: "Sorghum",
     soy_oil: "Soy Oil",
+    acid_oil: "Acid Oil",
+    palm_oil: "Palm Oil",
+    poultry_fat: "Pltry Fat",
     dl_met: "DL-Met",
     l_lys_hcl: "L-Lys HCl",
+    l_lys_sulfate: "L-Lys SO4",
     l_thr: "L-Thr",
     l_trp: "L-Trp",
+    l_val: "L-Val",
+    l_ile: "L-Ile",
+    l_arg: "L-Arg",
     limestone: "Limestone",
     dcp: "DCP",
+    mcp: "MCP",
     salt: "Salt",
+    sodium_bicarbonate: "Sod Bicarb",
     choline_chloride: "Choline",
     vitamin_premix: "Vit Premix",
     mineral_premix: "Min Premix",
+    vit_min_premix: "Vit+Min",
     anti_coccidial: "Anticoccid",
     toxin_binder: "Toxin Bdr",
     phytase: "Phytase",
     nsps: "NSPase",
     protease: "Protease",
     agps: "AGPs",
+    meat_bone_meal_45_cp: "MBM 45%",
+    meat_bone_meal_48_cp: "MBM 48%",
+    bovine_meat_bone_meal_48_cp: "MBM 48%",
+    bovine_meat_bone_meal_43_cp: "MBM 43%",
+    animal_protein_concentrate_55_cp: "APC 55%",
+    animal_protein_concentrate_65_cp: "APC 65%",
+    blood_meal: "Blood Meal",
+    feather_meal_84_cp: "Fthr Meal",
+    soybean_hulls: "Soy Hulls",
+    beet_pulp: "Beet Pulp",
+    molasses_cane: "Molasses",
+    alfalfa_meal_17_cp: "Alfalfa",
+    dicalcium_phosphate: "DiCa Phos",
+    monosodium_phosphate: "MonoNa Ph",
   };
 
   function padName(v) {
@@ -2968,6 +2998,7 @@ return buildFinalReply({
     const n = Number(v);
 
     if (Number.isNaN(n)) return "-".padStart(6, " ");
+    if (n > 0 && n < 0.01) return n.toFixed(3).padStart(6, " ");
 
     let s;
 
