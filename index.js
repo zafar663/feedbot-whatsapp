@@ -1,4 +1,4 @@
-// FILE: C:\Users\Administrator\My Drive\NutriPilot\nutripilot-agrocore\feedbot-whatsapp\index.js
+﻿// FILE: C:\Users\Administrator\My Drive\NutriPilot\nutripilot-agrocore\feedbot-whatsapp\index.js
 "use strict";
 
 /**
@@ -508,6 +508,553 @@ async function twilioSendWhatsApp({ to, from, body }) {
   return resp.data;
 }
 
+// ── Twilio Interactive Messages ───────────────────────────────────────────────
+
+async function twilioSendInteractiveList({ to, from, body, footer, sections }) {
+  try {
+    const url = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`;
+    const interactive = {
+      type: "list",
+      header: { type: "text", text: "🌾 AgroCore AI" },
+      body: { text: body },
+      footer: { text: footer || "Tap to select" },
+      action: {
+        button: "Select",
+        sections: sections.map(s => ({
+          title: s.title,
+          rows: s.rows.slice(0, 10).map(r => ({
+            id: String(r.id),
+            title: String(r.title).slice(0, 24),
+            description: String(r.description || "").slice(0, 72),
+          }))
+        }))
+      }
+    };
+    const form = new URLSearchParams();
+    form.set("To", String(to));
+    form.set("From", String(from));
+    form.set("Body", JSON.stringify({ interactive }));
+    const resp = await axios.post(url, form.toString(), {
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      auth: { username: TWILIO_ACCOUNT_SID, password: TWILIO_AUTH_TOKEN },
+      timeout: 25000,
+      validateStatus: () => true,
+    });
+    if (resp.status >= 200 && resp.status < 300) return { ok: true };
+    throw new Error(`Twilio list send failed (${resp.status})`);
+  } catch(e) {
+    let txt = body + "\n\n";
+    let n = 1;
+    for (const s of sections) {
+      if (s.title) txt += `*${s.title}*\n`;
+      for (const r of s.rows) { txt += `${n}. ${r.title}\n`; n++; }
+      txt += "\n";
+    }
+    await twilioSendWhatsApp({ to, from, body: txt.trim() });
+    return { ok: true, fallback: true };
+  }
+}
+
+async function twilioSendButtons({ to, from, body, buttons }) {
+  try {
+    const url = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`;
+    const interactive = {
+      type: "button",
+      body: { text: body },
+      action: {
+        buttons: buttons.slice(0, 3).map(b => ({
+          type: "reply",
+          reply: { id: String(b.id), title: String(b.title).slice(0, 20) }
+        }))
+      }
+    };
+    const form = new URLSearchParams();
+    form.set("To", String(to));
+    form.set("From", String(from));
+    form.set("Body", JSON.stringify({ interactive }));
+    const resp = await axios.post(url, form.toString(), {
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      auth: { username: TWILIO_ACCOUNT_SID, password: TWILIO_AUTH_TOKEN },
+      timeout: 25000,
+      validateStatus: () => true,
+    });
+    if (resp.status >= 200 && resp.status < 300) return { ok: true };
+    throw new Error(`Twilio buttons send failed (${resp.status})`);
+  } catch(e) {
+    let txt = body + "\n\n";
+    buttons.forEach((b, i) => { txt += `${i+1}. ${b.title}\n`; });
+    await twilioSendWhatsApp({ to, from, body: txt.trim() });
+    return { ok: true, fallback: true };
+  }
+}
+
+// ── Species / Breed / Phase Map ───────────────────────────────────────────────
+const SPECIES_MAP = {
+  broiler: { label:"🐔 Broiler (Meat)", section:"POULTRY", type:"broiler", species:"poultry", production:"meat",
+    breeds: {
+      cobb500:  { label:"Cobb 500",        desc:"Most common worldwide", phases:["starter","grower","finisher","withdrawal"] },
+      cobb700:  { label:"Cobb 700",        desc:"High yield",            phases:["starter","grower","finisher","withdrawal"] },
+      cobb800:  { label:"Cobb 800",        desc:"Premium",               phases:["starter","grower","finisher","withdrawal"] },
+      ross308:  { label:"Ross 308",        desc:"Aviagen standard",      phases:["starter","grower","finisher","withdrawal"] },
+      hubbard:  { label:"Hubbard",         desc:"Flex & Classic",        phases:["starter","grower","finisher","withdrawal"] },
+      aa:       { label:"Arbor Acres",     desc:"AA Plus",               phases:["starter","grower","finisher","withdrawal"] },
+      ir:       { label:"Indian River",    desc:"IR standard",           phases:["starter","grower","finisher","withdrawal"] },
+      generic:  { label:"Generic Broiler", desc:"No specific breed",     phases:["starter","grower","finisher","withdrawal"] },
+    }
+  },
+  layer: { label:"🥚 Layer (Egg)", section:"POULTRY", type:"layer", species:"poultry", production:"egg",
+    breeds: {
+      hyline_brown:  { label:"Hy-Line Brown",         desc:"Most popular brown", phases:["starter","grower","developer","prelay","lay_early","lay_peak","lay_mid","lay_late"] },
+      hyline_w36:    { label:"Hy-Line W-36",          desc:"White egg",          phases:["starter","grower","developer","prelay","lay_early","lay_peak","lay_mid","lay_late"] },
+      hyline_w80:    { label:"Hy-Line W-80",          desc:"High production",    phases:["starter","grower","developer","prelay","lay_early","lay_peak","lay_mid","lay_late"] },
+      lohmann_brown: { label:"Lohmann Brown Classic", desc:"Brown egg",          phases:["starter","grower","developer","prelay","lay_early","lay_peak","lay_mid","lay_late"] },
+      lohmann_lsl:   { label:"Lohmann LSL Classic",   desc:"White egg",          phases:["starter","grower","developer","prelay","lay_early","lay_peak","lay_mid","lay_late"] },
+      isa_brown:     { label:"ISA Brown",             desc:"Brown egg",          phases:["starter","grower","developer","prelay","lay_early","lay_peak","lay_mid","lay_late"] },
+      bovans_brown:  { label:"Bovans Brown",          desc:"Brown egg",          phases:["starter","grower","developer","prelay","lay_peak"] },
+      dekalb_white:  { label:"Dekalb White",          desc:"White egg",          phases:["starter","grower","developer","prelay","lay_early","lay_peak","lay_mid","lay_late"] },
+    }
+  },
+  broiler_breeder: { label:"🐓 Broiler Breeder", section:"POULTRY", type:"broiler_breeder", species:"poultry", production:"meat",
+    breeds: {
+      ross308: { label:"Ross 308 PS", desc:"Parent stock female", phases:["starter_1","starter_2","grower","pre_breeder","breeder_1","breeder_2","breeder_3"] },
+      cobb500: { label:"Cobb 500 FF", desc:"Female flock",        phases:["starter_1","starter_2","grower","pre_breeder","breeder_1","breeder_2","breeder_3"] },
+    }
+  },
+  turkey: { label:"🦃 Turkey", section:"POULTRY", type:"turkey", species:"poultry", production:"meat",
+    breeds: {
+      hybrid_converter: { label:"Hybrid Converter", desc:"Most common",      phases:["prestarter","starter","grower_1","grower_2","finisher_1","finisher_2"] },
+      nicholas:         { label:"Nicholas",          desc:"Hendrix",          phases:["prestarter","starter","grower_1","finisher_1"] },
+      aviagen_but:      { label:"Aviagen BUT 6",     desc:"BUT standard",     phases:["prestarter","starter","grower_1","finisher_1"] },
+      generic:          { label:"Generic Turkey",    desc:"No specific breed",phases:["starter","grower","finisher"] },
+    }
+  },
+  duck: { label:"🦆 Duck", section:"POULTRY", type:"duck", species:"poultry", production:"meat",
+    breeds: {
+      pekin:         { label:"Pekin",         desc:"Meat & layer", phases:["starter","grower","finisher"] },
+      cherry_valley: { label:"Cherry Valley", desc:"Commercial",   phases:["starter","grower","finisher","layer"] },
+      mulard:        { label:"Mulard",        desc:"Meat",         phases:["starter","grower","finisher"] },
+      muscovy:       { label:"Muscovy",       desc:"Meat",         phases:["starter","grower","finisher"] },
+      generic:       { label:"Generic Duck",  desc:"",             phases:["starter","grower","finisher"] },
+    }
+  },
+  quail: { label:"🐦 Quail", section:"POULTRY", type:"quail", species:"poultry", production:"meat",
+    breeds: {
+      coturnix:       { label:"Coturnix",       desc:"Meat & egg", phases:["starter","grower","layer"] },
+      japanese_meat:  { label:"Japanese Meat",  desc:"Meat",       phases:["starter","grower","finisher"] },
+      japanese_layer: { label:"Japanese Layer", desc:"Egg",        phases:["starter","layer"] },
+      generic:        { label:"Generic Quail",  desc:"",           phases:["starter","grower"] },
+    }
+  },
+  swine: { label:"🐷 Swine / Pig", section:"MONOGASTRIC", type:"pig", species:"swine", production:"meat",
+    breeds: {
+      danbred: { label:"DanBred",     desc:"Danish genetics",   phases:["nursery_p1","nursery_p2","nursery_p3","grower","finisher_early","finisher_mid","finisher_late","gestation","lactation"] },
+      pic:     { label:"PIC 337",     desc:"Genus PIC",         phases:["nursery","grower","finisher","gestation","lactation"] },
+      topigs:  { label:"Topigs TN70", desc:"Topigs Norsvin",    phases:["nursery","grower","finisher","gestation","lactation"] },
+      generic: { label:"Generic Pig", desc:"No specific breed", phases:["nursery_p1","nursery_p2","grower","finisher","gestation","lactation","boar","gilt"] },
+    }
+  },
+  dairy: { label:"🐄 Dairy Cattle", section:"RUMINANTS", type:"dairy", species:"bovine", production:"milk",
+    breeds: {
+      holstein: { label:"Holstein",      desc:"Most common dairy", phases:["dry_far_off","dry_close_up","fresh","early_lactation","mid_lactation","late_lactation"] },
+      jersey:   { label:"Jersey",        desc:"High fat milk",     phases:["dry_far_off","dry_close_up","fresh","early_lactation","mid_lactation","late_lactation"] },
+      generic:  { label:"Generic Dairy", desc:"",                  phases:["dry","early_lactation","mid_lactation","late_lactation"] },
+    }
+  },
+  beef: { label:"🐂 Beef Cattle", section:"RUMINANTS", type:"beef", species:"bovine", production:"meat",
+    breeds: {
+      feedlot:  { label:"Feedlot",      desc:"Intensive finishing", phases:["receiving","growing","finishing"] },
+      cow_calf: { label:"Cow-Calf",     desc:"Breeding herd",       phases:["dry_gestation","lactation","calf_starter","stocker"] },
+      generic:  { label:"Generic Beef", desc:"",                    phases:["growing","finishing"] },
+    }
+  },
+  sheep: { label:"🐑 Sheep", section:"RUMINANTS", type:"sheep", species:"sheep", production:"meat",
+    breeds: {
+      meat:    { label:"Meat Sheep",    desc:"Dorper, Suffolk",  phases:["ewe_maintenance","ewe_late_gestation","ewe_lactation","lamb_starter","lamb_grower","finisher"] },
+      dairy:   { label:"Dairy Sheep",   desc:"East Friesian",    phases:["dry","lactation","lamb_starter"] },
+      wool:    { label:"Wool Sheep",    desc:"Merino etc",       phases:["maintenance","gestation","lactation"] },
+      generic: { label:"Generic Sheep", desc:"",                 phases:["maintenance","gestation","lactation","lamb_grower"] },
+    }
+  },
+  goat: { label:"🐐 Goat", section:"RUMINANTS", type:"goat", species:"goat", production:"meat",
+    breeds: {
+      dairy:   { label:"Dairy Goat",   desc:"Alpine, Saanen",   phases:["dry","early_lactation","mid_lactation","late_lactation","kid_starter"] },
+      meat:    { label:"Meat Goat",    desc:"Boer, Kalahari",   phases:["maintenance","gestation","lactation","kid_grower","finisher"] },
+      dual:    { label:"Dual Purpose", desc:"Meat & milk",      phases:["maintenance","gestation","lactation"] },
+      fiber:   { label:"Fiber Goat",   desc:"Angora, Cashmere", phases:["maintenance","gestation","lactation"] },
+    }
+  },
+  horse: { label:"🐴 Horse", section:"EQUINE", type:"horse", species:"equine", production:"work",
+    breeds: {
+      warmblood:    { label:"Warmblood",     desc:"Sport horse",  phases:["maintenance","light_work","moderate_work","heavy_work","intense_work","foal","weanling","yearling","pregnant","lactation"] },
+      thoroughbred: { label:"Thoroughbred",  desc:"Racing",       phases:["maintenance","light_work","moderate_work","heavy_work","foal","weanling","yearling","pregnant","lactation"] },
+      draft:        { label:"Draft Horse",   desc:"Heavy breeds", phases:["maintenance","light_work","moderate_work","pregnant","lactation"] },
+      generic:      { label:"Generic Horse", desc:"",             phases:["maintenance","light_work","moderate_work","heavy_work","foal","weanling","yearling","pregnant","lactation"] },
+    }
+  },
+  donkey: { label:"🫏 Donkey", section:"EQUINE", type:"donkey", species:"equine", production:"work",
+    breeds: {
+      generic: { label:"Donkey", desc:"", phases:["maintenance","working","pregnant","lactation","foal"] },
+    }
+  },
+  mule: { label:"🐴 Mule", section:"EQUINE", type:"mule", species:"equine", production:"work",
+    breeds: {
+      generic: { label:"Mule", desc:"", phases:["maintenance","working","pregnant","lactation"] },
+    }
+  },
+  fish: { label:"🐟 Fish / Aqua", section:"AQUACULTURE", type:"fish", species:"aqua", production:"meat",
+    breeds: {
+      salmon:  { label:"Salmon / Trout", desc:"Atlantic salmon, rainbow", phases:["fry","fingerling","smolt","grow_out","broodstock"] },
+      tilapia: { label:"Tilapia",        desc:"Nile tilapia",             phases:["fry","fingerling","grow_out","broodstock"] },
+      catfish: { label:"Catfish",        desc:"Channel/African",          phases:["fry","fingerling","grow_out"] },
+      shrimp:  { label:"Shrimp",         desc:"Vannamei/Monodon",         phases:["pl","juvenile","grow_out"] },
+      generic: { label:"Generic Fish",   desc:"",                         phases:["fry","fingerling","grow_out"] },
+    }
+  },
+  dog: { label:"🐕 Dog", section:"COMPANION", type:"dog", species:"companion", production:"companion",
+    breeds: {
+      small:  { label:"Small Breed",  desc:"< 10kg adult",  phases:["puppy","adult","senior","gestation","lactation"] },
+      medium: { label:"Medium Breed", desc:"10-25kg adult", phases:["puppy","adult","senior","gestation","lactation"] },
+      large:  { label:"Large Breed",  desc:"> 25kg adult",  phases:["puppy","adult","senior","gestation","lactation"] },
+    }
+  },
+  cat: { label:"🐈 Cat", section:"COMPANION", type:"cat", species:"companion", production:"companion",
+    breeds: {
+      generic: { label:"Cat", desc:"All breeds", phases:["kitten","adult","senior","gestation","lactation"] },
+    }
+  },
+};
+
+const PHASE_LABELS = {
+  starter:"🌱 Starter", grower:"📈 Grower", finisher:"🏁 Finisher", withdrawal:"⏱ Withdrawal",
+  prelay:"🥚 Pre-lay", lay_early:"🥚 Lay Early", lay_peak:"🥚 Lay Peak", lay_mid:"🥚 Lay Mid", lay_late:"🥚 Lay Late",
+  developer:"🌱 Developer", pre_breeder:"🔄 Pre-breeder",
+  breeder_1:"🐓 Breeder 1", breeder_2:"🐓 Breeder 2", breeder_3:"🐓 Breeder 3",
+  starter_1:"🌱 Starter 1", starter_2:"🌱 Starter 2", prestarter:"🌱 Pre-starter",
+  grower_1:"📈 Grower 1", grower_2:"📈 Grower 2",
+  finisher_1:"🏁 Finisher 1", finisher_2:"🏁 Finisher 2",
+  finisher_early:"🏁 Early", finisher_mid:"🏁 Mid", finisher_late:"🏁 Late", finisher_market:"🏁 Market",
+  nursery:"🐷 Nursery", nursery_p1:"🐷 Nursery P1", nursery_p2:"🐷 Nursery P2", nursery_p3:"🐷 Nursery P3",
+  gestation:"🤰 Gestation", lactation:"🍼 Lactation", boar:"🐗 Boar", gilt:"🐷 Gilt",
+  dry:"🌾 Dry", dry_far_off:"🌾 Dry Far-off", dry_close_up:"🌾 Dry Close-up", fresh:"🌿 Fresh",
+  early_lactation:"🍼 Early Lact.", mid_lactation:"🍼 Mid Lact.", late_lactation:"🍼 Late Lact.",
+  maintenance:"⚖️ Maintenance", light_work:"🚶 Light Work", moderate_work:"🏃 Moderate", heavy_work:"💪 Heavy", intense_work:"🏇 Intense",
+  foal:"🐴 Foal", weanling:"🌱 Weanling", yearling:"📅 Yearling", pregnant:"🤰 Pregnant",
+  ewe_maintenance:"⚖️ Ewe Maint.", ewe_late_gestation:"🤰 Late Gest.", ewe_lactation:"🍼 Ewe Lact.",
+  lamb_starter:"🌱 Lamb Starter", lamb_grower:"📈 Lamb Grower",
+  kid_starter:"🌱 Kid Starter", kid_grower:"📈 Kid Grower",
+  receiving:"📦 Receiving", growing:"📈 Growing", finishing:"🏁 Finishing",
+  dry_gestation:"🤰 Dry Gest.", calf_starter:"🌱 Calf Starter", stocker:"🐂 Stocker",
+  fry:"🐟 Fry", fingerling:"🐟 Fingerling", smolt:"🐟 Smolt", grow_out:"📈 Grow-out", broodstock:"🐟 Broodstock",
+  pl:"🦐 Post-larva", juvenile:"🦐 Juvenile",
+  puppy:"🐶 Puppy", adult:"🐕 Adult", senior:"🐾 Senior", kitten:"🐱 Kitten",
+  working:"🏋️ Working",
+};
+
+// ── Twilio Content Template SIDs ─────────────────────────────────────────────
+const CONTENT_SIDS = {
+  species_1: "HX4dd570142f3c8c1bcbfea57ac614f577",
+  species_2: "HX1ab0d1ea048ea304e389efb70a5283a1",
+  breed_broiler:         "HXe23eb5556b74d0eaa3207f40fd5adc39",
+  breed_layer:           "HX7c4834c4e7477306118db1c589ae6317",
+  breed_turkey:          "HX28e680ef70eacab98858ac93bb0b0b5b",
+  breed_duck:            "HX409eefe6e2260d2fd07fddc4803567a5",
+  breed_swine:           "HX7346c021375912a0d0dd499f11fc1357",
+  breed_dairy:           "HX772ef9e874727a1a73b7592be7303867",
+  breed_beef:            "HX0e33a2b882bf3f402e8c049c667abab2",
+  breed_sheep:           "HX17a7d10f37aa32606e19d5c58574343e",
+  breed_goat:            "HX2296fe86f2a32459745abdbcabc8fb76",
+  breed_horse:           "HX3c234fc9c398fd4122a62dd180da1b94",
+  breed_fish:            "HX1540f776e1f1457e71e49996d066d60b",
+  breed_dog:             "HXf8bc9c733ce68cc03e11658f75af7b74",
+  phase_broiler:         "HX2401792647180b171e5f687bf9f91255",
+  phase_layer:           "HX1b64d72b5d83e99ea70efef52f2f124a",
+  phase_turkey:          "HX682f10f26b30c4616fd02281a9964af1",
+  phase_swine:           "HX7a5a003c6ea519c101c591ed5062a728",
+  phase_dairy:           "HXd316ee3af5958619797b62ecb1a35ff3",
+  phase_beef:            "HXd231e0ff51956bedd7ffbc61da70fd18",
+  phase_sheep:           "HX18fe3b99d1b9fa1cd2906832ee605aa4",
+  phase_goat:            "HXb4a94caec75d5b94206a0b39f9a83bff",
+  phase_horse:           "HX69b9c165cc9a3deb21a07b8fcadc6244",
+  phase_fish:            "HX093edc9919b8b0e6c48a12348d4d3b95",
+  phase_dog:             "HXaee2755b4f3d6e79ac196a56d0186daf",
+  phase_generic:         "HX766175938f307b03bcfec0027c75fb63",
+};
+
+// Map species to breed/phase ContentSids
+function getBreedSid(speciesKey) {
+  const map = {
+    broiler:"breed_broiler", layer:"breed_layer", turkey:"breed_turkey",
+    duck:"breed_duck", quail:null, broiler_breeder:"breed_broiler",
+    swine:"breed_swine", dairy:"breed_dairy", beef:"breed_beef",
+    sheep:"breed_sheep", goat:"breed_goat", horse:"breed_horse",
+    donkey:null, mule:null, fish:"breed_fish", dog:"breed_dog", cat:null,
+  };
+  const key = map[speciesKey];
+  return key ? CONTENT_SIDS[key] : null;
+}
+
+function getPhaseSid(speciesKey) {
+  const map = {
+    broiler:"phase_broiler", layer:"phase_layer", turkey:"phase_turkey",
+    duck:"phase_generic", quail:"phase_generic", broiler_breeder:"phase_broiler",
+    swine:"phase_swine", dairy:"phase_dairy", beef:"phase_beef",
+    sheep:"phase_sheep", goat:"phase_goat", horse:"phase_horse",
+    donkey:"phase_generic", mule:"phase_generic", fish:"phase_fish",
+    dog:"phase_dog", cat:"phase_generic",
+  };
+  const key = map[speciesKey];
+  return key ? CONTENT_SIDS[key] : CONTENT_SIDS.phase_generic;
+}
+
+async function sendContentSid({ to, from, contentSid }) {
+  const url = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`;
+  const form = new URLSearchParams();
+  form.set("To", String(to));
+  form.set("From", String(from));
+  form.set("ContentSid", contentSid);
+  const resp = await axios.post(url, form.toString(), {
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    auth: { username: TWILIO_ACCOUNT_SID, password: TWILIO_AUTH_TOKEN },
+    timeout: 25000,
+    validateStatus: () => true,
+  });
+  return resp.status >= 200 && resp.status < 300;
+}
+
+
+
+// ── Context flow helpers ───────────────────────────────────────────────────
+
+function ctxSpeciesMenu() {
+  const sections = {};
+  Object.entries(SPECIES_MAP).forEach(([key, sp]) => {
+    if (!sections[sp.section]) sections[sp.section] = [];
+    sections[sp.section].push({ id:`sp_${key}`, title:sp.label, description:`${Object.keys(sp.breeds).length} breeds` });
+  });
+  return Object.entries(sections).map(([title, rows]) => ({ title, rows }));
+}
+
+function ctxBreedMenu(speciesKey) {
+  const sp = SPECIES_MAP[speciesKey];
+  if (!sp) return [];
+  return [{ title: sp.label, rows: Object.entries(sp.breeds).map(([key, br]) => ({
+    id: `br_${speciesKey}__${key}`,
+    title: br.label,
+    description: br.desc || "",
+  }))}];
+}
+
+function ctxPhaseButtons(speciesKey, breedKey) {
+  const breed = SPECIES_MAP[speciesKey]?.breeds?.[breedKey];
+  if (!breed) return [];
+  return breed.phases.map(p => ({ id:`ph_${speciesKey}__${breedKey}__${p}`, title: PHASE_LABELS[p] || p }));
+}
+
+function ctxBuildContext(speciesKey, breedKey, phase) {
+  const sp = SPECIES_MAP[speciesKey];
+  if (!sp) return null;
+  return { locale:"US", region:"global", version:"v1", species:sp.species, type:sp.type, production:sp.production, breed:breedKey, phase };
+}
+
+async function sendSpeciesMenu({ to, from }) {
+  // Send first species list (Poultry + Monogastric)
+  const ok1 = await sendContentSid({ to, from, contentSid: CONTENT_SIDS.species_1 });
+  if (!ok1) {
+    await twilioSendInteractiveList({ to, from,
+      body: "Select animal species:",
+      footer: "Tap to select",
+      sections: ctxSpeciesMenu(),
+    });
+  }
+}
+
+async function sendBreedMenu({ to, from, speciesKey }) {
+  const sp = SPECIES_MAP[speciesKey];
+  if (!sp) return;
+  const contentSid = getBreedSid(speciesKey);
+  if (contentSid) {
+    const ok = await sendContentSid({ to, from, contentSid });
+    if (ok) return;
+  }
+  // Fallback to text list
+  await twilioSendInteractiveList({ to, from,
+    body: `${sp.label}\n\nSelect the breed:`,
+    footer: "Tap to select breed",
+    sections: ctxBreedMenu(speciesKey),
+  });
+}
+
+async function sendPhaseMenu({ to, from, speciesKey, breedKey }) {
+  const breed = SPECIES_MAP[speciesKey]?.breeds?.[breedKey];
+  if (!breed) return;
+  const contentSid = getPhaseSid(speciesKey);
+  if (contentSid) {
+    const ok = await sendContentSid({ to, from, contentSid });
+    if (ok) return;
+  }
+  // Fallback to text list
+  const buttons = ctxPhaseButtons(speciesKey, breedKey);
+  await twilioSendInteractiveList({ to, from,
+    body: `${breed.label} selected \u2713\n\nSelect production phase:`,
+    footer: "Tap to select phase",
+    sections: [{ title:"Production Phase", rows: buttons }],
+  });
+}
+
+async function handleInteractiveContextReply({ Body, From, To, session }) {
+  const b = String(Body || "").trim();
+
+  // Species selection
+  if (b.startsWith("sp_") || session?.ctx_step === "species") {
+    let speciesKey = b.startsWith("sp_") ? b.replace("sp_", "") : null;
+    if (!speciesKey) {
+      // Match by number
+      const n = parseInt(b, 10);
+      const keys = Object.keys(SPECIES_MAP);
+      if (n >= 1 && n <= keys.length) {
+        speciesKey = keys[n - 1];
+      } else {
+        // Match by label text (from list-picker tap)
+        const bLower = b.toLowerCase().trim();
+        speciesKey = Object.keys(SPECIES_MAP).find(k => {
+          const label = SPECIES_MAP[k].label.toLowerCase().replace(/[^a-z0-9 ]/g, "").trim();
+          return label.includes(bLower) || bLower.includes(label.split(" ")[1] || label);
+        });
+      }
+    }
+    // Handle "More species" option
+    if (speciesKey === "more" || b === "sp_more" || b.includes("more species")) {
+      session.ctx_step = "species";
+      await sendContentSid({ to:From, from:To, contentSid: CONTENT_SIDS.species_2 });
+      session.updatedAt = nowMs();
+      return true;
+    }
+    if (!speciesKey || !SPECIES_MAP[speciesKey]) {
+      await twilioSendWhatsApp({ to:From, from:To, body:"Please select a valid species (tap or reply a number)." });
+      return true;
+    }
+    session.ctx_species = speciesKey;
+    const breedKeys = Object.keys(SPECIES_MAP[speciesKey].breeds);
+    if (breedKeys.length === 1) {
+      session.ctx_breed = breedKeys[0];
+      session.ctx_step = "phase";
+      await sendPhaseMenu({ to:From, from:To, speciesKey, breedKey:breedKeys[0] });
+    } else {
+      session.ctx_step = "breed";
+      await sendBreedMenu({ to:From, from:To, speciesKey });
+    }
+    session.updatedAt = nowMs();
+    return true;
+  }
+
+  // Breed selection
+  if (b.startsWith("br_") || session?.ctx_step === "breed") {
+    let speciesKey = session?.ctx_species;
+    let breedKey = null;
+    if (b.startsWith("br_")) {
+      const parts = b.replace("br_", "").split("__");
+      speciesKey = parts[0];
+      breedKey = parts[1];
+    } else {
+      const n = parseInt(b, 10);
+      if (speciesKey && n >= 1) {
+        const keys = Object.keys(SPECIES_MAP[speciesKey]?.breeds || {});
+        if (n <= keys.length) breedKey = keys[n - 1];
+      }
+    }
+    if (!breedKey) {
+      // Match by label text (from list-picker tap)
+      const bLower = b.toLowerCase().trim();
+      const breeds = SPECIES_MAP[speciesKey]?.breeds || {};
+      breedKey = Object.keys(breeds).find(k => {
+        const label = breeds[k].label.toLowerCase().replace(/[^a-z0-9 ]/g, "").trim();
+        return label === bLower || label.includes(bLower) || bLower.includes(label);
+      });
+    }
+    if (!breedKey || !SPECIES_MAP[speciesKey]?.breeds?.[breedKey]) {
+      await twilioSendWhatsApp({ to:From, from:To, body:"Please select a valid breed (tap or reply a number)." });
+      return true;
+    }
+    session.ctx_species = speciesKey;
+    session.ctx_breed = breedKey;
+    session.ctx_step = "phase";
+    session.updatedAt = nowMs();
+    await sendPhaseMenu({ to:From, from:To, speciesKey, breedKey });
+    return true;
+  }
+
+  // Phase selection
+  if (b.startsWith("ph_") || session?.ctx_step === "phase") {
+    let speciesKey = session?.ctx_species;
+    let breedKey = session?.ctx_breed;
+    let phase = null;
+    if (b.startsWith("ph_")) {
+      const parts = b.replace("ph_", "").split("__");
+      speciesKey = parts[0];
+      breedKey = parts[1];
+      phase = parts[2];
+    } else {
+      const n = parseInt(b, 10);
+      if (speciesKey && breedKey && n >= 1) {
+        const phases = SPECIES_MAP[speciesKey]?.breeds?.[breedKey]?.phases || [];
+        if (n <= phases.length) phase = phases[n - 1];
+      }
+    }
+    if (!phase) {
+      // Match by label text (list-picker sends label)
+      const bLower = b.toLowerCase().trim();
+      const phases = SPECIES_MAP[speciesKey]?.breeds?.[breedKey]?.phases || [];
+      phase = phases.find(p => {
+        const label = (PHASE_LABELS[p] || p).toLowerCase().replace(/[^a-z0-9 ]/g, "").trim();
+        return label === bLower || label.includes(bLower) || bLower.includes(label.split(" ").slice(-1)[0]);
+      });
+      // Also match phase__ prefix from list-picker id if ButtonPayload came through
+      if (!phase && b.startsWith("phase__")) {
+        phase = b.replace("phase__", "");
+      }
+    }
+    if (!phase) {
+      await twilioSendWhatsApp({ to:From, from:To, body:"Please select a valid phase (tap or reply a number)." });
+      return true;
+    }
+    const ctx = ctxBuildContext(speciesKey, breedKey, phase);
+    if (!ctx) { await twilioSendWhatsApp({ to:From, from:To, body:"Context error. Please try again." }); return true; }
+
+    session.context = ctx;
+    session._needs_fresh_context = false;
+    session.ctx_step = null;
+    session.ctx_species = null;
+    session.ctx_breed = null;
+
+    const breed = SPECIES_MAP[speciesKey]?.breeds?.[breedKey];
+    const confirmMsg = `✅ *${breed?.label || breedKey} — ${PHASE_LABELS[phase] || phase}*\n\nNow send your formula:\n📄 PDF file\n📊 Excel file\n📝 Text (paste ingredients)`;
+
+    const pending = session.pending_context || null;
+    const media = session.pending_media || null;
+    session.pending_context = null;
+    session.pending_media = null;
+    session.updatedAt = nowMs();
+
+    if (pending) {
+      await twilioSendWhatsApp({ to:From, from:To, body:confirmMsg });
+      startAsyncMediaJob({ From, To, MediaUrl0:null, MediaContentType0:null,
+        _override:{ formula_text:pending.formula_text, resolved_rows:pending.resolved_rows, ingestMeta:pending.ingestMeta }
+      });
+    } else if (media) {
+      await twilioSendWhatsApp({ to:From, from:To, body:confirmMsg });
+      startAsyncMediaJob({ From:media.From, To:media.To, MediaUrl0:media.MediaUrl0, MediaContentType0:media.MediaContentType0 });
+    } else {
+      await twilioSendWhatsApp({ to:From, from:To, body:confirmMsg });
+    }
+    return true;
+  }
+
+  return false;
+}
+
+// ── End Interactive Context Selector ─────────────────────────────────────────
+
+
 // ---------------- Rendering (NEAT WhatsApp MONOSPACE table) ----------------
 function padRight(s, w) {
   s = String(s ?? "");
@@ -889,22 +1436,12 @@ async function runAnalyze({ formula_text, resolved_rows = [], ingestMeta, sessio
     : resolveFormulaRows(formula_text);
 
   // ---------------- CONTEXT GATE ----------------
-  if (!session?.context || !session.context.breed || !session.context.phase) {
-    session.pending_context = {
-      formula_text,
-      resolved_rows,
-      ingestMeta,
-    };
-
-    return {
-      needs_context: true,
-      message: `Please select context:
-
-1. Broiler →’ Ross308 →’ Starter
-2. Broiler →’ Cobb500 →’ Starter
-3. Layer →’ Hy-Line →’ Peak
-4. Type manually (e.g. "Ross308 starter")`,
-    };
+  const _freshUpload = session?._needs_fresh_context === true;
+  if (_freshUpload || !session?.context || !session.context.breed || !session.context.phase) {
+    session._needs_fresh_context = false;
+    session.pending_context = { formula_text, resolved_rows, ingestMeta };
+    if (!session.ctx_step) session.ctx_step = "species";
+    return { needs_context: true, message: "" };
   }
 
   const body = {
@@ -1267,7 +1804,9 @@ function startAsyncMediaJob({ From, To, MediaUrl0, MediaContentType0, _override 
       });
 
       if (r?.needs_context) {
-        await twilioSendWhatsApp({ to: From, from: To, body: r.message });
+        if (!session.ctx_step) session.ctx_step = "species";
+        try { await sendSpeciesMenu({ to: From, from: To }); }
+        catch(e) { console.log("[CTX] async species menu error", e?.message); }
         return;
       }
 
@@ -1317,8 +1856,6 @@ if (overallBeforeSend === "FAIL" || overallBeforeSend === "WARN") {
 // try outbound send (may fail due to 63038)
 await twilioSendWhatsApp({ to: From, from: To, body: reply });
 
-// try outbound send (may fail due to 63038)
-await twilioSendWhatsApp({ to: From, from: To, body: reply });
 console.log("[DBG async notify OK]", { to: From, from: To });
 
 // ðŸ”¥ BACKUP STORE FAIL (IN CASE TRY FLOW BREAKS)
@@ -2178,7 +2715,11 @@ doc.end();
 async function whatsappHandler(req) {
   pruneSessions();
 
-  const Body = (req.body?.Body || "").trim();
+  // Use ButtonPayload (quick-reply button ID) or ListId (list selection) if present
+  const _rawBody = (req.body?.Body || "").trim();
+  const _buttonPayload = (req.body?.ButtonPayload || "").trim();
+  const _listId = (req.body?.ListId || "").trim();
+  const Body = _buttonPayload || _listId || _rawBody;
   const From = req.body?.From || "anon";
   const To = req.body?.To || "";
   const NumMediaRaw = req.body?.NumMedia;
@@ -2203,6 +2744,11 @@ async function whatsappHandler(req) {
     MediaUrl0: req.body?.MediaUrl0,
     MediaContentType0: req.body?.MediaContentType0,
     Body_len: Body.length,
+    Body_preview: Body.slice(0, 50),
+    ButtonPayload: req.body?.ButtonPayload,
+    ButtonText: req.body?.ButtonText,
+    ListId: req.body?.ListId,
+    ListTitle: req.body?.ListTitle,
   });
 
   // Skip greeting and QA if waiting for media context or unresolved ingredients
@@ -2270,33 +2816,10 @@ async function whatsappHandler(req) {
     }
   }
 
-  // ---------------- PENDING MEDIA CONTEXT REPLY ----------------
-  if (!NumMedia && session?.pending_media) {
-    const bCtx = Body.trim().toLowerCase();
-    if (bCtx === "1" || /ross\s*308|ross308/i.test(bCtx)) {
-      session.context = { locale:"US", region:"global", version:"v1", species:"poultry", type:"broiler", production:"meat", breed:"Ross308", phase:"starter" };
-    } else if (bCtx === "2" || /cobb\s*500|cobb500/i.test(bCtx)) {
-      session.context = { locale:"US", region:"global", version:"v1", species:"poultry", type:"broiler", production:"meat", breed:"Cobb500", phase:"starter" };
-    } else if (bCtx === "3" || /hy[-\s]?line|hyline/i.test(bCtx)) {
-      session.context = { locale:"US", region:"global", version:"v1", species:"poultry", type:"layer", production:"egg", breed:"hyline", phase:"peak" };
-    } else if (/grower/i.test(bCtx) && /cobb/i.test(bCtx)) {
-      session.context = { locale:"US", region:"global", version:"v1", species:"poultry", type:"broiler", production:"meat", breed:"Cobb500", phase:"grower" };
-    } else if (/grower/i.test(bCtx) && /ross/i.test(bCtx)) {
-      session.context = { locale:"US", region:"global", version:"v1", species:"poultry", type:"broiler", production:"meat", breed:"Ross308", phase:"grower" };
-    } else if (/finish/i.test(bCtx) && /ross/i.test(bCtx)) {
-      session.context = { locale:"US", region:"global", version:"v1", species:"poultry", type:"broiler", production:"meat", breed:"Ross308", phase:"finisher" };
-    } else if (/finish/i.test(bCtx) && /cobb/i.test(bCtx)) {
-      session.context = { locale:"US", region:"global", version:"v1", species:"poultry", type:"broiler", production:"meat", breed:"Cobb500", phase:"finisher" };
-    } else {
-      return `Please select:\n1️⃣ Broiler → Ross308 → Starter\n2️⃣ Broiler → Cobb500 → Starter\n3️⃣ Layer → Hy-Line → Peak\n4️⃣ Type manually`;
-    }
-    if (session.context) {
-      const media = session.pending_media;
-      session.pending_media = null;
-      session.updatedAt = nowMs();
-      startAsyncMediaJob({ From: media.From, To: media.To, MediaUrl0: media.MediaUrl0, MediaContentType0: media.MediaContentType0 });
-      return "🐔 *Analyzing your formula...*\n\n🌾 Results will arrive in a few seconds.\n_(If delayed, type: RESULT)_";
-    }
+  // ---------------- INTERACTIVE CONTEXT REPLY ----------------
+  if (!NumMedia && (session?.pending_media || session?.pending_context || session?.ctx_step)) {
+    const handled = await handleInteractiveContextReply({ Body, From, To, session });
+    if (handled) return "";
   }
 
   // ---------------- Q&A ENGINE ----------------
@@ -2779,111 +3302,6 @@ if (
   session.updatedAt = nowMs();
 }
 
-  // ---------------- CONTEXT SELECTION REPLY ----------------
-  if (session?.pending_context && Body) {
-    const b = String(Body || "").trim().toLowerCase();
-
-    if (b === "1" || /ross\s*308|ross308/i.test(b)) {
-      session.context = {
-        locale: "US",
-        region: "global",
-        version: "v1",
-        species: "poultry",
-        type: "broiler",
-        production: "meat",
-        breed: "Ross308",
-        phase: "starter",
-      };
-    } else if (b === "2" || /cobb\s*500|cobb500/i.test(b)) {
-      session.context = {
-        locale: "US",
-        region: "global",
-        version: "v1",
-        species: "poultry",
-        type: "broiler",
-        production: "meat",
-        breed: "Cobb500",
-        phase: "starter",
-      };
-    } else if (b === "3" || /hy[-\s]?line|hyline/i.test(b)) {
-      session.context = {
-        locale: "US",
-        region: "global",
-        version: "v1",
-        species: "poultry",
-        type: "layer",
-        production: "egg",
-        breed: "hyline",
-        phase: "peak",
-      };
-    } else {
-      return `Please reply with 1, 2, or 3.
-
-1. Broiler →’ Ross308 →’ Starter
-2. Broiler →’ Cobb500 →’ Starter
-3. Layer →’ Hy-Line →’ Peak
-
-Or type manually, e.g. Ross308 starter`;
-    }
-
-    // If there's a pending media file — process it now with selected context
-    if (session.pending_media) {
-      const media = session.pending_media;
-      session.pending_media = null;
-      session.pending_context = null;
-      session.updatedAt = nowMs();
-      startAsyncMediaJob({ From: media.From, To: media.To, MediaUrl0: media.MediaUrl0, MediaContentType0: media.MediaContentType0 });
-      return "🐔 *Analyzing your formula...*\n\n🌾 Results will arrive in a few seconds.\n_(If delayed, type: RESULT)_";
-    }
-
-    const pending = session.pending_context;
-    session.pending_context = null;
-    session.updatedAt = nowMs();
-
-    const r = await runAnalyze({
-  formula_text: pending.formula_text,
-  resolved_rows: pending.resolved_rows || [],
-  ingestMeta: pending.ingestMeta || {},
-  session,
-});
-
-if (r?.needs_context) return r.message;
-
-// ðŸ”¥ STORE FAIL HERE (THIS IS THE MISSING PIECE)
-const overall = String(r?.evaluation?.overall || r?.overall || "").toUpperCase();
-
-if (overall === "FAIL" || overall === "WARN") {
-  session.last_failed_formula = {
-    analysis: r,
-    formula_text:
-  pending?.formula_text ||
-  r?.formula_text ||
-  r?.input?.formula_text ||
-  session?.last_formula_text ||
-  "",
-    resolved_rows: pending.resolved_rows || [],
-    ingestMeta: { ...(pending.ingestMeta || {}) },
-    context: session.context || {},
-    analyze_result: r,
-    createdAt: nowMs(),
-  };
-
-  session.updatedAt = nowMs();
-
-  console.log("[DBG STORE FAIL CONTEXT]", {
-    stored: true,
-    overall,
-    formula_len: pending.formula_text?.length,
-  });
-}
-
-return buildFinalReply({
-  rAnalyze: r,
-  ingestMeta: pending.ingestMeta || {},
-  session,
-});
-  }
-
   if (/^(NUTRIX|NUTRIX LITE|WEB|LITE)$/i.test(Body)) {
     return await createNutrixLiteLinkFromSession({ session });
   }
@@ -3107,23 +3525,25 @@ return buildFinalReply({
     const mediaCt0 = req.body?.MediaContentType0 || "application/octet-stream";
     if (!mediaUrl0) return "âŒ MediaUrl0 missing from Twilio payload.";
 
-    // If no context yet — store media and ask for context first
-    if (!session.context || !session.context.breed || !session.context.phase) {
-      session.pending_media = {
-        MediaUrl0: mediaUrl0,
-        MediaContentType0: mediaCt0,
-        From,
-        To,
-        createdAt: nowMs(),
-      };
-      session.updatedAt = nowMs();
-      return `🐔 *File received!*\n\nBefore I analyze, please select the animal type:\n\n1️⃣ Broiler → Ross308 → Starter\n2️⃣ Broiler → Cobb500 → Starter\n3️⃣ Layer → Hy-Line → Peak\n4️⃣ Type manually (e.g. "Ross308 starter")`;
-    }
-
-    // Context exists — process immediately
-    startAsyncMediaJob({ From, To, MediaUrl0: mediaUrl0, MediaContentType0: mediaCt0 });
-    return "🐔 *Analyzing your formula...*\n\n🌾 Results will arrive in a few seconds.\n_(If delayed, type: RESULT)_";
-  }
+    // Always ask for animal type/breed/phase on every new upload - interactive flow
+    session.context = null;
+    session._needs_fresh_context = true;
+    session.ctx_step = "species";
+    session.ctx_species = null;
+    session.ctx_breed = null;
+    session.pending_media = {
+      MediaUrl0: mediaUrl0,
+      MediaContentType0: mediaCt0,
+      From,
+      To,
+      createdAt: nowMs(),
+    };
+    session.updatedAt = nowMs();
+    setImmediate(async () => {
+      try { await sendSpeciesMenu({ to: From, from: To }); }
+      catch(e) { console.log("[CTX] species menu error", e?.message); }
+    });
+    return "";
 
   
   // ---------------- Auto-detect farm performance data ----------------
@@ -3411,9 +3831,27 @@ function formatDeepFixReply(opt, originalFormulaText) {
   out.push("Try:");
   out.push("FIX = Quick Fix");
   out.push("or use Nutrix Dashboard for full optimization controls.");
+  }
+  out.push("Optimized formula:");
+  out.push("```");
+  if (optimizedText) {
+    out.push("Ingredient        %");
+    out.push("------------ ------");
+    const rows = parseFormulaTextToRows(optimizedText);
+    for (const r of rows.slice(0, 25)) {
+      const name = String(r.ingredient || "-");
+      const short = name.length <= 12 ? name.padEnd(12, " ") : (name.slice(0, 6) + "." + name.slice(-4)).padEnd(12, " ");
+      const n = Number(r.inclusion);
+      const val = Number.isFinite(n) ? n.toFixed(2).padStart(6, " ") : "-".padStart(6, " ");
+      out.push(`${short} ${val}`);
+    }
+  } else {
+    out.push("Optimizer completed, but no formula rows found.");
+  }
+  out.push("```");
+  out.push("");
+  out.push("Full Nutrix optimization controls in dashboard.");
   return out.join("\n");
-  
-  return fullReply;
 }
 
 function formatDeepFixScenarioReply(opt, scenario) {
