@@ -102,6 +102,9 @@ async function SafeReply(handler, req, res) {
     });
 
     if (!res.headersSent) {
+      if (out === null) {
+        return res.status(200).type("text/xml").send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+      }
       const xml = twimlMessage(out || "OK");
 
       console.log("[DBG SafeReply sending TwiML]", {
@@ -2819,7 +2822,7 @@ async function whatsappHandler(req) {
   // ---------------- INTERACTIVE CONTEXT REPLY ----------------
   if (!NumMedia && (session?.pending_media || session?.pending_context || session?.ctx_step)) {
     const handled = await handleInteractiveContextReply({ Body, From, To, session });
-    if (handled) return "";
+    if (handled) return null;
   }
 
   // ---------------- Q&A ENGINE ----------------
@@ -3543,7 +3546,7 @@ if (
       try { await sendSpeciesMenu({ to: From, from: To }); }
       catch(e) { console.log("[CTX] species menu error", e?.message); }
     });
-    return "";
+    return null;
 
   
   // ---------------- Auto-detect farm performance data ----------------
