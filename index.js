@@ -755,6 +755,7 @@ const PHASE_LABELS = {
 
 // ── Twilio Content Template SIDs ─────────────────────────────────────────────
 const CONTENT_SIDS = {
+  main_menu: "HXfb73cc6becd61b96a7b620ae3e47dc76",
   species_1: "HX4dd570142f3c8c1bcbfea57ac614f577",
   species_2: "HX1ab0d1ea048ea304e389efb70a5283a1",
   breed_broiler:         "HXe23eb5556b74d0eaa3207f40fd5adc39",
@@ -782,6 +783,59 @@ const CONTENT_SIDS = {
   phase_dog:             "HXaee2755b4f3d6e79ac196a56d0186daf",
   phase_generic:         "HX766175938f307b03bcfec0027c75fb63",
 };
+
+// ── Registration helpers ─────────────────────────────────────────────────────
+const ADMIN_NOTIFY_NUMBER = 'whatsapp:+15717259023';
+
+const REGISTRATION_PROMPT = `🌾 *Welcome to AgroCore AI*
+━━━━━━━━━━━━━━━━━━━
+Livestock Feed Intelligence Platform
+
+To get started, please register:
+
+*Name:* [your full name]
+*Company:* [farm or company name]
+*Country:* [your country]
+*Role:* farmer / nutritionist / consultant / student / other
+
+_Reply with the above format to register instantly._`;
+
+async function checkRegistered(phone) {
+  try {
+    const r = await axios.get(`${AGROCORE_BASE}/v1/registrations/check/${encodeURIComponent(phone)}`, { timeout: 5000, validateStatus: () => true });
+    return r.data?.registered === true;
+  } catch(e) { return false; }
+}
+
+async function saveRegistration(data) {
+  try {
+    const r = await axios.post(`${AGROCORE_BASE}/v1/registrations`, data, { timeout: 5000, validateStatus: () => true });
+    return r.data;
+  } catch(e) { return null; }
+}
+
+function parseRegistrationReply(text) {
+  const t = String(text || '');
+  const reg = {};
+  const nameMatch = t.match(/name\s*[:=\-]\s*(.+)/i);
+  const compMatch = t.match(/company\s*[:=\-]\s*(.+)/i) || t.match(/farm\s*[:=\-]\s*(.+)/i);
+  const countryMatch = t.match(/country\s*[:=\-]\s*(.+)/i) || t.match(/location\s*[:=\-]\s*(.+)/i);
+  const roleMatch = t.match(/role\s*[:=\-]\s*(.+)/i);
+  if (nameMatch) reg.name = nameMatch[1].trim().split('\n')[0].trim();
+  if (compMatch) reg.company = compMatch[1].trim().split('\n')[0].trim();
+  if (countryMatch) reg.country = countryMatch[1].trim().split('\n')[0].trim();
+  if (roleMatch) reg.role = roleMatch[1].trim().split('\n')[0].trim();
+  return reg;
+}
+
+// Cache registrations in memory to avoid DB hit on every message
+const _regCache = new Map();
+async function isRegistered(phone) {
+  if (_regCache.has(phone)) return true;
+  const ok = await checkRegistered(phone);
+  if (ok) _regCache.set(phone, true);
+  return ok;
+}
 
 // Map species to breed/phase ContentSids
 function getBreedSid(speciesKey) {
@@ -2754,13 +2808,111 @@ async function whatsappHandler(req) {
     ListTitle: req.body?.ListTitle,
   });
 
+  // ── Registration gate ─────────────────────────────────────────────────────
+  const _phone = String(From || '');
+  const _registered = await isRegistered(_phone);
+  if (!_registered) {
+    const _reg = parseRegistrationReply(Body);
+    if (_reg.name && _reg.country) {
+      const regData = { phone: _phone, name: _reg.name, company: _reg.company || 'Not provided', country: _reg.country, role: _reg.role || 'Not provided', platform: 'whatsapp' };
+      await saveRegistration(regData);
+      _regCache.set(_phone, true);
+      // Notify admin
+      setImmediate(async () => {
+        try {
+          await twilioSendWhatsApp({ to: ADMIN_NOTIFY_NUMBER, from: To,
+            body: `🆕 *New AgroCore AI Registration*
+━━━━━━━━━━━━━━━━━━━
+👤 *Name:* ${regData.name}
+🏢 *Company:* ${regData.company}
+🌍 *Country:* ${regData.country}
+💼 *Role:* ${regData.role}
+📱 *Phone:* ${_phone}
+🕐 *Time:* ${new Date().toLocaleString()}
+━━━━━━━━━━━━━━━━━━━`
+          });
+        } catch(e) { console.log('[REG] notify error', e?.message); }
+      });
+      // Welcome + main menu
+      setImmediate(async () => {
+        try {
+          await twilioSendWhatsApp({ to: From, from: To, body: `✅ *Registration Complete!*
+
+Welcome, ${regData.name}!
+
+You now have full access to AgroCore AI.` });
+          await new Promise(r => setTimeout(r, 800));
+          await sendContentSid({ to: From, from: To, contentSid: CONTENT_SIDS.main_menu });
+        } catch(e) { console.log('[REG] welcome error', e?.message); }
+      });
+      return null;
+    }
+    // Show registration prompt
+    setImmediate(async () => {
+      try { await twilioSendWhatsApp({ to: From, from: To, body: REGISTRATION_PROMPT }); }
+      catch(e) { console.log('[REG] prompt error', e?.message); }
+    });
+    return null;
+  }
+  // ── End registration gate ──────────────────────────────────────────────────
+
   // Skip greeting and QA if waiting for media context or unresolved ingredients
   const bypassQA = !!(session?.pending_media || session?.pending_unresolved);
 
   // ---------------- OPENING / GREETING ----------------
   if (!NumMedia && !bypassQA && looksLikeGreeting(Body)) {
     session.qa_context = null;
-    return buildMainMenu();
+    session.ctx_step = null;
+    session.ctx_species = null;
+    session.ctx_breed = null;
+    // Send interactive main menu
+    setImmediate(async () => {
+      try { await sendContentSid({ to: From, from: To, contentSid: CONTENT_SIDS.main_menu }); }
+      catch(e) { console.log("[MENU] error", e?.message); }
+    });
+    return null;
+  }
+
+  // Handle main menu selections
+  if (!NumMedia && /^menu__/.test(Body)) {
+    const menuId = Body.trim();
+    if (menuId === "menu__analyze") {
+      session.ctx_step = "species";
+      session.ctx_species = null;
+      session.ctx_breed = null;
+      setImmediate(async () => {
+        try { await sendSpeciesMenu({ to: From, from: To }); }
+        catch(e) { console.log("[MENU] species error", e?.message); }
+      });
+      return null;
+    }
+    if (menuId === "menu__performance") {
+      return "🐄 *Performance Check*\n\nSend farm data e.g.:\nRoss308 day28\nBW 1420g, FCR 1.85, mort 2.1%\n\nOr type PERF to view last result.";
+    }
+    if (menuId === "menu__requirements") {
+      return "🧪 *Nutrient Requirements*\n\nType e.g.:\nLysine level Cobb500 finisher\nCP requirement Ross308 starter";
+    }
+    if (menuId === "menu__mill") {
+      return "🏭 *Feed Mill Operations*\n\nType MILL BATCHES to see recent batches\nType BATCH <number> for details";
+    }
+    if (menuId === "menu__standards") {
+      return "📊 *Production Standards*\n\nType e.g.:\nCobb500 finisher standards\nRoss308 day 35 performance";
+    }
+  }
+
+  // Also handle menu selections by label text (list-picker sends label)
+  if (!NumMedia && !bypassQA) {
+    const bMenu = Body.trim().toLowerCase();
+    if (bMenu === "analyze formula" || bMenu === "📋 analyze formula") {
+      session.ctx_step = "species";
+      session.ctx_species = null;
+      session.ctx_breed = null;
+      setImmediate(async () => {
+        try { await sendSpeciesMenu({ to: From, from: To }); }
+        catch(e) {}
+      });
+      return null;
+    }
   }
 
   // ---------------- UNRESOLVED INGREDIENT REPLY ----------------
@@ -2821,8 +2973,20 @@ async function whatsappHandler(req) {
 
   // ---------------- INTERACTIVE CONTEXT REPLY ----------------
   if (!NumMedia && (session?.pending_media || session?.pending_context || session?.ctx_step)) {
-    const handled = await handleInteractiveContextReply({ Body, From, To, session });
-    if (handled) return null;
+    // Allow CONTEXT reset and greetings to escape the flow
+    const _isEscape = /^(context|reset|cancel|stop|hi|hello|hey|start over)$/i.test(Body.trim());
+    const _isCmd = /^(FIX|RESULT|MORE|ADVICE|PERF|RESULT|NUTRIX|WEB|LITE)$/i.test(Body.trim());
+    if (_isEscape || _isCmd) {
+      session.ctx_step = null;
+      session.ctx_species = null;
+      session.ctx_breed = null;
+      session.pending_context = null;
+      session.pending_media = null;
+      // Let normal flow handle it
+    } else {
+      const handled = await handleInteractiveContextReply({ Body, From, To, session });
+      if (handled) return null;
+    }
   }
 
   // ---------------- Q&A ENGINE ----------------
