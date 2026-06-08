@@ -49,6 +49,22 @@ const SESS = new Map();
 const SESS_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 const nowMs = () => Date.now();
 
+// ── Webhook dedup (prevents double-firing on Twilio duplicate webhooks) ──────
+const _recentWebhooks = new Map();
+function isDuplicateWebhook(from, body) {
+  const key = `${from}:${body}`;
+  const now = Date.now();
+  if (_recentWebhooks.has(key) && now - _recentWebhooks.get(key) < 3000) return true;
+  _recentWebhooks.set(key, now);
+  // Cleanup old entries
+  if (_recentWebhooks.size > 200) {
+    for (const [k, t] of _recentWebhooks.entries()) {
+      if (now - t > 10000) _recentWebhooks.delete(k);
+    }
+  }
+  return false;
+}
+
 function getSession(from) {
   const key = String(from || "anon");
   const s = SESS.get(key);
@@ -914,6 +930,7 @@ function ctxBuildContext(speciesKey, breedKey, phase) {
 }
 
 async function sendSpeciesMenu({ to, from }) {
+  console.log("[SPECIES MENU] called", new Error().stack.split("\n").slice(1,4).join(" | "));
   // Send first species list (Poultry + Monogastric)
   const ok1 = await sendContentSid({ to, from, contentSid: CONTENT_SIDS.species_1 });
   if (!ok1) {
@@ -1090,6 +1107,8 @@ async function handleInteractiveContextReply({ Body, From, To, session }) {
     const media = session.pending_media || null;
     session.pending_context = null;
     session.pending_media = null;
+    session._needs_fresh_context = false;
+    session.ctx_step = null;
     session.updatedAt = nowMs();
 
     if (pending) {
@@ -2783,6 +2802,13 @@ async function whatsappHandler(req) {
   const NumMedia = Number(NumMediaRaw || 0);
 
   const session = touchSession(From);
+
+  // Deduplicate Twilio double-webhooks (list-picker sends label + ID separately)
+  if (isDuplicateWebhook(From, Body)) {
+    console.log("[DEDUP] duplicate webhook ignored", { From, Body: Body.slice(0,30) });
+    return "";
+  }
+
   if (session?.pending_deepfix_scenario && /^[123]$/.test(Body)) {
   session.pending_deepfix_scenario = false;
 
@@ -2900,20 +2926,7 @@ You now have full access to AgroCore AI.` });
     }
   }
 
-  // Also handle menu selections by label text (list-picker sends label)
-  if (!NumMedia && !bypassQA) {
-    const bMenu = Body.trim().toLowerCase();
-    if (bMenu === "analyze formula" || bMenu === "📋 analyze formula") {
-      session.ctx_step = "species";
-      session.ctx_species = null;
-      session.ctx_breed = null;
-      setImmediate(async () => {
-        try { await sendSpeciesMenu({ to: From, from: To }); }
-        catch(e) {}
-      });
-      return null;
-    }
-  }
+  // Menu label matching handled by menu__ handler above
 
   // ---------------- UNRESOLVED INGREDIENT REPLY ----------------
   if (!NumMedia && session?.pending_unresolved) {
@@ -3616,6 +3629,17 @@ if (
 
   const out = [];
 
+  // Status header at top
+  const _qfStatus = qf.status.after || qf.status.before || "WARN";
+  const _qfEmoji = _qfStatus === "OK" ? "✅" : _qfStatus === "WARN" ? "⚠️" : "❌";
+  const _ctx = session?.context || {};
+  const _breedLabel = [_ctx.type, _ctx.breed, _ctx.phase].filter(Boolean).map(s => s.charAt(0).toUpperCase() + s.slice(1)).join(" ");
+  out.push("🌾 *AgroCore AI*");
+  out.push("━━━━━━━━━━━━━━━━━━━");
+  out.push(`${_qfEmoji} *Status: ${_qfStatus}*`);
+  if (_breedLabel) out.push(`📋 ${_breedLabel}`);
+  out.push("━━━━━━━━━━━━━━━━━━━");
+  out.push("");
   out.push("AgroCore AI — Quick Fix");
   out.push(`Status: ${qf.status.before} -> ${qf.status.after}`);
   out.push("");
@@ -3632,20 +3656,7 @@ if (
   out.push("```");
   out.push("");
 
-  const formulaRows = parseFormulaLines(qf.new_formula_text);
-
-  out.push("Corrected formula:");
-  out.push("```");
-  out.push("Ingredient        %");
-  out.push("------------ ------");
-
-  for (const r of formulaRows) {
-    out.push(`${padName(r.ingredient)} ${padVal(r.inclusion)}`);
-  }
-
-  out.push("```");
-  out.push("");
-  // Run analyze on corrected formula to show nutrient improvement
+  // Nutrient Profile FIRST
   try {
     const afterR = await runAnalyze({
       formula_text: qf.new_formula_text,
@@ -3655,11 +3666,22 @@ if (
     });
     if (afterR && !afterR.needs_context) {
       const afterTable = buildNeatTable({ rAnalyze: afterR, ingestMeta: {}, session });
-      out.push("");
       out.push("*Corrected Nutrient Profile:*");
       out.push(afterTable);
+      out.push("");
     }
   } catch(e) { /* skip if fails */ }
+  // Corrected Formula AFTER
+  const formulaRows = parseFormulaLines(qf.new_formula_text);
+  out.push("Corrected formula:");
+  out.push("```");
+  out.push("Ingredient        %");
+  out.push("------------ ------");
+  for (const r of formulaRows) {
+    out.push(`${padName(r.ingredient)} ${padVal(r.inclusion)}`);
+  }
+  out.push("```");
+  out.push("");
 
   out.push("");
   out.push("Download options:");
@@ -3692,6 +3714,12 @@ if (
     const mediaCt0 = req.body?.MediaContentType0 || "application/octet-stream";
     if (!mediaUrl0) return "âŒ MediaUrl0 missing from Twilio payload.";
 
+    // If context already set from interactive flow - go straight to analysis
+    if (session.context && session.context.breed && session.context.phase && !session._needs_fresh_context) {
+      startAsyncMediaJob({ From, To, MediaUrl0: mediaUrl0, MediaContentType0: mediaCt0 });
+      return null;
+    }
+    // No context yet - ask for species/breed/phase
     // Always ask for animal type/breed/phase on every new upload - interactive flow
     session.context = null;
     session._needs_fresh_context = true;
@@ -4021,112 +4049,7 @@ function formatDeepFixReply(opt, originalFormulaText) {
   return out.join("\n");
 }
 
-function formatDeepFixScenarioReply(opt, scenario) {
-  const out = [];
-
-  const status =
-    opt?.status ||
-    opt?.solver_status?.termination ||
-    opt?.optimization_status ||
-    "COMPLETED";
-
-  out.push("AgroCore AI");
-
-  if (scenario === "cost") {
-    out.push("Scenario: Cost Reduction");
-  } else if (scenario === "low_synthetic") {
-    out.push("Scenario: Low Synthetic Additives");
-  } else {
-    out.push("Scenario: Nutrition Balance");
-  }
-
-  out.push(`Status: ${status}`);
-  out.push("");
-
-  const rows = Array.isArray(opt?.starting_formula_comparison?.rows)
-    ? opt.starting_formula_comparison.rows
-    : [];
-
-  const changedRows = rows
-    .map((r) => {
-      const before = Number(r.start_inclusion || 0);
-      const after = Number(r.optimized_inclusion || 0);
-      const delta = after - before;
-
-      return {
-        id: r.id || r.display_name || "ingredient",
-        before,
-        after,
-        delta,
-        absDelta: Math.abs(delta),
-      };
-    })
-    .filter((r) => r.absDelta > 0.001)
-    .sort((a, b) => b.absDelta - a.absDelta)
-    .slice(0, 8);
-
-  if (!changedRows.length) {
-    out.push("Result:");
-    out.push("No major ingredient movement was needed under this scenario.");
-    out.push("");
-  } else {
-    out.push("Top Changes:");
-    out.push("```");
-    out.push("Ingredient     Before  After");
-    out.push("------------   ------ ------");
-
-    for (const r of changedRows) {
-      const name =
-        r.id.length <= 12
-          ? r.id.padEnd(12, " ")
-          : (r.id.slice(0, 6) + ".." + r.id.slice(-4)).padEnd(12, " ");
-
-      out.push(
-        `${name} ${r.before.toFixed(2).padStart(6, " ")} ${r.after
-          .toFixed(2)
-          .padStart(6, " ")}`
-      );
-    }
-
-    out.push("```");
-    out.push("");
-  }
-
-  const nutrientResults = opt?.nutrient_results || {};
-  const nutrientKeys = Object.keys(nutrientResults).slice(0, 8);
-
-  if (nutrientKeys.length) {
-    out.push("Optimized Nutrients:");
-    out.push("```");
-
-    for (const key of nutrientKeys) {
-      const val = Number(nutrientResults[key]);
-      out.push(
-        `${String(key).padEnd(10, " ")} ${
-          Number.isFinite(val) ? val.toFixed(3) : "-"
-        }`
-      );
-    }
-
-    out.push("```");
-    out.push("");
-  }
-
-  if (scenario === "cost") {
-    out.push("Focus: lower-cost optimized formula under controlled rules.");
-  } else if (scenario === "low_synthetic") {
-    out.push("Focus: reduce synthetic additive dependence where possible.");
-  } else {
-    out.push("Focus: improve nutrient balance with limited formula movement.");
-  }
-
-  out.push("");
-  out.push("Reply:");
-  out.push("1 = PDF report");
-  out.push("2 = Excel formula");
-
-  return out.join("\n");
-}
+// formatDeepFixScenarioReply moved below
 
   out.push("Optimized formula:");
   out.push("```");
@@ -4296,6 +4219,113 @@ const payload = {
     console.error("[NUTRIX_LITE] error", err);
     return "Nutrix Lite link could not be created.";
   }
+}
+
+function formatDeepFixScenarioReply(opt, scenario) {
+  const out = [];
+
+  const status =
+    opt?.status ||
+    opt?.solver_status?.termination ||
+    opt?.optimization_status ||
+    "COMPLETED";
+
+  out.push("AgroCore AI");
+
+  if (scenario === "cost") {
+    out.push("Scenario: Cost Reduction");
+  } else if (scenario === "low_synthetic") {
+    out.push("Scenario: Low Synthetic Additives");
+  } else {
+    out.push("Scenario: Nutrition Balance");
+  }
+
+  out.push(`Status: ${status}`);
+  out.push("");
+
+  const rows = Array.isArray(opt?.starting_formula_comparison?.rows)
+    ? opt.starting_formula_comparison.rows
+    : [];
+
+  const changedRows = rows
+    .map((r) => {
+      const before = Number(r.start_inclusion || 0);
+      const after = Number(r.optimized_inclusion || 0);
+      const delta = after - before;
+
+      return {
+        id: r.id || r.display_name || "ingredient",
+        before,
+        after,
+        delta,
+        absDelta: Math.abs(delta),
+      };
+    })
+    .filter((r) => r.absDelta > 0.001)
+    .sort((a, b) => b.absDelta - a.absDelta)
+    .slice(0, 8);
+
+  if (!changedRows.length) {
+    out.push("Result:");
+    out.push("No major ingredient movement was needed under this scenario.");
+    out.push("");
+  } else {
+    out.push("Top Changes:");
+    out.push("```");
+    out.push("Ingredient     Before  After");
+    out.push("------------   ------ ------");
+
+    for (const r of changedRows) {
+      const name =
+        r.id.length <= 12
+          ? r.id.padEnd(12, " ")
+          : (r.id.slice(0, 6) + ".." + r.id.slice(-4)).padEnd(12, " ");
+
+      out.push(
+        `${name} ${r.before.toFixed(2).padStart(6, " ")} ${r.after
+          .toFixed(2)
+          .padStart(6, " ")}`
+      );
+    }
+
+    out.push("```");
+    out.push("");
+  }
+
+  const nutrientResults = opt?.nutrient_results || {};
+  const nutrientKeys = Object.keys(nutrientResults).slice(0, 8);
+
+  if (nutrientKeys.length) {
+    out.push("Optimized Nutrients:");
+    out.push("```");
+
+    for (const key of nutrientKeys) {
+      const val = Number(nutrientResults[key]);
+      out.push(
+        `${String(key).padEnd(10, " ")} ${
+          Number.isFinite(val) ? val.toFixed(3) : "-"
+        }`
+      );
+    }
+
+    out.push("```");
+    out.push("");
+  }
+
+  if (scenario === "cost") {
+    out.push("Focus: lower-cost optimized formula under controlled rules.");
+  } else if (scenario === "low_synthetic") {
+    out.push("Focus: reduce synthetic additive dependence where possible.");
+  } else {
+    out.push("Focus: improve nutrient balance with limited formula movement.");
+  }
+
+  out.push("");
+  out.push("Reply:");
+  out.push("1 = PDF report");
+  out.push("2 = Excel formula");
+
+  return out.join("\n");
 }
 
 async function runDeepFixScenario({ session, scenario }) {
